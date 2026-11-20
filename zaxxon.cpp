@@ -146,8 +146,10 @@ static void sound_wavs(const std::string &dir)
 		{ "01", "Laser (force field), looped",                 0, 0xbf, 0xff, 5.0, 6.0 },
 		{ "02", "Base missile, one-shot",                      0, 0xdf, 0xff, 0.1, 6.0 },
 		{ "03", "Homing missile, looped",                      0, 0xef, 0xff, 6.0, 7.0 },
-		{ "04", "Player ship, D low only (A/B bits = 3)",      0, 0xf7, 0xff, 5.0, 6.5 },
-		{ "05", "Player ship, C and D low (A/B bits = 3)",     0, 0xf3, 0xff, 5.0, 6.5 },
+		/* the MAME samples 04 / 05 are narrow-band tones of about 331 Hz and 626 Hz; of the four A/B settings the engine filter gives
+		   about 229, 408, 537 and 646 Hz, so these two files use the closest ones (A/B = 1 and A/B = 0) */
+		{ "04", "Player ship, D low only, A/B bits = 1 (closest to the 331 Hz sample)", 0, 0xf5, 0xff, 5.0, 6.5 },
+		{ "05", "Player ship, D low only, A/B bits = 0 (closest to the 626 Hz sample)", 0, 0xf4, 0xff, 5.0, 6.5 },
 		{ "08", "Cannon (your ship's fire), one-shot",         1, 0x7f, 0xff, 0.1, 3.0 },
 		{ "10", "M-Exp (ship explosion), one-shot",            1, 0xdf, 0xff, 0.1, 5.0 },
 		{ "11", "S-Exp (enemy explosion), one-shot",           1, 0xef, 0xff, 0.1, 4.0 },

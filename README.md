@@ -62,7 +62,7 @@ Two tools need no ROMs:
 * `zaxxon --sound-test` – a window where keys trigger every sound (Q cannon, W M-Exp, E S-Exp, R shot,
   T base missile, Y/U alarms, 1 battleship, 2 laser, 3 homing missile, 4 player ship on/off, 5 ship A/B bits).
 * `zaxxon --sound-wavs folder` – one WAV per sound, named like the MAME sample files (`00.wav` battleship, `01` laser, `02` base missile,
-  `03` homing missile, `04`/`05` player ship, `08` cannon, `10` M-Exp, `11` S-Exp, `20` alarm 3, `21` alarm 2, `23` shot), plus `sounds.txt`.
+  `03` homing missile, `04`/`05` player ship (A/B = 1 and 0), `08` cannon, `10` M-Exp, `11` S-Exp, `20` alarm 3, `21` alarm 2, `23` shot), plus `sounds.txt`.
 * `zaxxon --sound-demo demo.wav` – every sound one after another in one WAV file, for A/B listening against the MAME samples.
 
 ## What is emulated
@@ -82,22 +82,29 @@ about 3.0 V of control voltage, then roughly 45 dB per volt (curve read from the
 self-described guess; the Sallen-Key filters are real biquads from the
 schematic R and C values. It is a per-sample behavioural model, not a SPICE solver.
 
-| Sound (8255 bit) | Model | Confidence |
+**Calibrated to the MAME samples.** A numeric comparison (`compare_samples.py`: level over time, energy per band, strongest peaks, pitch
+over time; no audio was exchanged) showed that circuit-derived envelopes and some frequencies were off. So the following are now
+fitted to the sample statistics rather than derived from the drawing, and are marked `[CALIBRATED]` in the source: the loudness envelopes of
+S-EXP, M-EXP, base missile, cannon and shot (dB tables, `DbEnv`); the S-EXP / M-EXP low-pass corners; the base-missile band (≈325 Hz);
+the cannon's resonant sweep (≈3.5 kHz down to ≈1.9 kHz); the shot sweep; the alarm frequencies (2272 Hz and 1141 Hz); the battleship (a steady
+132 Hz square wave); the laser and homing-missile pitch; and the per-sound levels (`trim[]`). Circuit-derived: the noise source, the
+filter shapes, the laser/homing oscillator structure, the engine photocell filter.
+
+| Sound (8255 bit) | Model | Basis |
 |---|---|---|
-| S-EXP (B4), M-EXP (B5) | noise → Sallen-Key low-pass (≈320 Hz / ≈225 Hz, Q 2) → MB4391 driven by a 74123 + diode/RC envelope | good – component values clear |
-| Base missile (A5) | noise → low-pass (≈480 Hz) → MB4391 with a slow envelope | good |
-| Cannon (B7) | noise through an op-amp whose feedback capacitor is shunted by a transistor driven from a peak-detector envelope | medium – the exact VCA path is partly guessed |
-| Shot (C0) | relaxation VCO, control sweeps down after the trigger, gated by a one-shot/RC envelope | medium – sweep range assumed |
-| Alarm 2 / 3 (C2, C3) | 556 oscillator (≈20 kHz) divided by the 74393, wired-NAND mixed and clipped | medium – which divider tap feeds which alarm is assumed |
-| Battleship (A7) | two coupled op-amp relaxation oscillators (slow one sweeps the fast one) | medium – the junction coupling the two is assumed |
-| Laser (A6) | 555 LFO sweeping an op-amp relaxation VCO | medium |
-| Homing missile (A4) | 555 whose control voltage is driven by a Schmitt trigger / noise network | medium-low |
-| Player ship (A–D) | noise → resonant band-pass whose resonance is set by a photocell (PC1) lit by an LED driven from the A/B bits; the C/D bits open two MB4391 envelopes | medium-low – the A/B to pitch mapping and the C/D envelopes are approximate |
+| S-EXP (B4), M-EXP (B5) | noise → Sallen-Key low-pass (Q 2) → loudness envelope | filter from the schematic, corner and envelope fitted to the samples |
+| Base missile (A5) | noise → narrow band-pass (≈325 Hz) → envelope | fitted |
+| Cannon (B7) | noise → resonant band-pass sweeping ≈3.5 → 1.9 kHz → envelope | fitted |
+| Shot (C0) | square wave with a falling frequency sweep → envelope | fitted |
+| Alarm 2 / 3 (C2, C3) | square waves from a ≈18.2 kHz 556 divided by 16 / by 8 | fitted; the pulse length is the 74123 value (≈0.13 s) and may be longer than the sample files |
+| Battleship (A7) | steady 131.9 Hz square wave | fitted (the real circuit's two coupled oscillators were modelled earlier, but the sample is steady) |
+| Laser (A6) | 555 LFO sweeping an op-amp relaxation VCO | circuit, pitch scaled ×0.87 |
+| Homing missile (A4) | 555 whose control voltage is driven by a Schmitt trigger / noise network | circuit, pitch scaled ×1.15 |
+| Player ship (A–D) | noise → resonant band-pass whose resonance is set by a photocell (PC1) lit by an LED driven from the A/B bits; the C/D bits open two MB4391 envelopes (modelled as an MC3340) | circuit; the A/B setting to pitch mapping is uncertain: the engine gives ≈646, 537, 408 and 229 Hz for A/B = 0..3, the samples are ≈626 and ≈331 Hz |
 | Not modelled | the 834-5106 daughterboard (schematic pages 14-15): the game never drives port B bits 0-3 | – |
 
-The relative loudness of the channels comes from the summing resistors on the schematic. Because my reading of the drawing is not
-perfect, `ZaxSynth::trim[]` in `zaxxon_synth.h` holds one ear-calibrated multiplier per sound (1.0 = as derived), and
-`MASTER` sets the overall level. Every place where the drawing was ambiguous is marked `[ASSUMPTION]` in the source.
+Overall level: `ZaxSynth::trim[]` holds one level per sound, set so that each sound's RMS is 12 dB below the matching sample's RMS (leaving
+headroom for mixing), and `MASTER` sets the overall level with a soft limiter. The sample files are not part of this repository.
 Tell me which sounds differ from the MAME samples and I will go back to the corresponding circuit.
 
 ## Credits and licences

@@ -7,8 +7,9 @@
  *   - MM5837 digital noise source (17-bit LFSR, taps 14/17 as in MAME's mm5837.h, ~103 kHz at 12 V)
  *   - 74123 one-shots (t = 0.28 * R * C * (1 + 0.7/R[k]))          -> trigger / gate pulses
  *   - RC envelope networks with diodes                              -> the explosion / missile / shot envelopes
- *   - MB4391 voltage controlled attenuators -> modelled as an MC3340: +13 dB max, 0 dB below 3.0 V, about 45 dB per volt above 3.6 V
- *     (treated as an MC3340: Figure 3 of its datasheet, +13 dB maximum gain)
+ *   - MB4391 voltage controlled attenuators -> modelled as an MC3340 (Figure 3 of its datasheet, +13 dB maximum gain);
+ *     used for the player-ship engine.  The explosion / missile / cannon / shot loudness envelopes are CALIBRATED to the
+ *     decay curves of the MAME sample files instead (see DbEnv), because the circuit-derived ones were too short.
  *   - Sallen-Key low-pass filters (U3), bilinear-transformed biquads
  *   - Op-amp / comparator relaxation oscillators with transistor switches (battleship, laser, shot)
  *   - 555 timers (laser LFO, homing missile), 556 + 74393 divider (alarms)
@@ -97,6 +98,39 @@ struct ZaxSynth {
 		void tick(double dt) { if (left > 0) left -= dt; }
 	};
 
+	/* loudness envelope read off the MAME sample files: (seconds, dB) points, linear in dB between them, silent after the last */
+	struct DbPt { double t, db; };
+	struct DbEnv {
+		const DbPt *p = nullptr; int n = 0; double t = 1e9;
+		void set(const DbPt *pts, int cnt) { p = pts; n = cnt; t = 1e9; }
+		void trigger() { t = 0; }
+		void tick(double dt) { if (t < 1e8) t += dt; }
+		bool active() const { return p && t < p[n - 1].t; }
+		double gain() const
+		{
+			if (!active()) return 0.0;
+			int i = 1; while (i < n - 1 && t > p[i].t) i++;
+			const double f = (t - p[i - 1].t) / (p[i].t - p[i - 1].t);
+			return std::pow(10.0, (p[i - 1].db + f * (p[i].db - p[i - 1].db)) / 20.0);
+		}
+	};
+	/* band-pass state-variable filter (topology-preserving), unity gain at the centre frequency */
+	struct SVF {
+		double ic1 = 0, ic2 = 0, a1 = 0, a2 = 0, a3 = 0, k = 1;
+		void set(double f, double Q)
+		{
+			const double g = std::tan(M_PI * f / FS); k = 1.0 / Q;
+			a1 = 1.0 / (1.0 + g * (g + k)); a2 = g * a1; a3 = g * a2;
+		}
+		double bp(double x)
+		{
+			const double v3 = x - ic2, v1 = a1 * ic1 + a2 * v3, v2 = ic2 + a2 * ic1 + a3 * v3;
+			ic1 = 2 * v1 - ic1; ic2 = 2 * v2 - ic2;
+			return k * v1;
+		}
+		void clear() { ic1 = ic2 = 0; }
+	};
+
 	/* ------------------------------------------------------------- state */
 	uint8_t port[3] = { 0xff, 0xff, 0xff };
 
@@ -104,34 +138,21 @@ struct ZaxSynth {
 	uint32_t lfsr = 0x1ffff; double noise_phase = 0;
 	static constexpr double NOISE_CLK = 103200.0, NOISE_VPP = 7.5;
 
-	/* explosion style envelopes (74123 + diode + RC + follower -> MB4391 CON) */
-	struct DiodeEnv {
-		double B = 5.0;                            /* voltage on the envelope capacitor */
-		double tau_dis = 0, tau_chg = 0, vlow = 0.85, vtop = 5.0;
-		OneShot os;
-		void tick(double dt)
-		{
-			os.tick(dt);
-			if (os.active()) B = rc_step(B, vlow, dt, tau_dis); else B = rc_step(B, vtop, dt, tau_chg);
-		}
-		double con() const { return (5.0 + B) * 0.5; }        /* R_a = R_b divider into the follower */
-	};
-	DiodeEnv env_sexp, env_mexp, env_base;
-	Biquad lp_sexp, lp_mexp, lp_base;
-	HP1 hp_sexp, hp_mexp, hp_base;
-
-	/* cannon */
-	OneShot os_cannon; double v_cannon = 0; Biquad lp_cannon_dummy; LP1 lp_cannon; HP1 hp_cannon;
+	/* explosion / missile / cannon / shot loudness envelopes (dB tables measured from the MAME samples) */
+	DbEnv e_sexp, e_mexp, e_base, e_cannon, e_shot;
+	Biquad lp_sexp, lp_mexp;
+	HP1 hp_sexp, hp_mexp;
+	SVF bp_base, bp_cannon;
+	double cannon_t = 10.0;
 
 	/* shot */
-	OneShot os_shot; double v_shot = 7.61, shot_t = 10.0, shot_phase = 0; bool shot_state = false; double shot_v = 5.0;
+	double shot_t = 10.0, shot_phase = 0;
 
 	/* alarms */
 	OneShot os_a2, os_a3; double alarm_phase2 = 0, alarm_phase3 = 0;
+	double bs_phase = 0;
 
-	/* battleship (two relaxation oscillators) */
-	double bs_vs = 5.0; bool bs_hi = true;         /* slow oscillator: integrator voltage and comparator state */
-	double bs_vf = 5.0; bool bs_fhi = true;        /* fast oscillator */
+	/* battleship */
 	/* laser */
 	double lz_v = 4.0; bool lz_charge = true;      /* 555 timing capacitor */
 	double lz_vf = 5.0; bool lz_fhi = true;        /* laser VCO */
@@ -149,11 +170,18 @@ struct ZaxSynth {
 
 	/* output */
 	HP1 hp_out;
+	/* Loudness envelopes: (seconds after the trigger, dB) taken from the 50 ms RMS curves of the MAME sample files */
+	static constexpr DbPt ENV_SEXP[]   = { {0,-1},{0.1,0},{0.25,-1},{0.5,-5},{0.75,-8.5},{1.0,-13},{1.25,-21},{1.5,-31},{1.72,-60} };
+	static constexpr DbPt ENV_MEXP[]   = { {0,-1},{0.1,-1},{0.25,0},{0.5,0},{1.0,0},{1.5,-1},{2.0,-2},{2.5,-10},{3.0,-23},{3.4,-40},{3.73,-70} };
+	static constexpr DbPt ENV_BASE[]   = { {0,-1},{0.1,-1},{0.25,-2},{0.5,-2},{0.68,-3},{0.72,-40} };
+	static constexpr DbPt ENV_CANNON[] = { {0,0},{0.1,-2},{0.25,-6},{0.5,-9},{0.75,-17},{1.0,-32},{1.15,-60} };
+	static constexpr DbPt ENV_SHOT[]   = { {0,-1},{0.1,0},{0.25,0},{0.5,-8},{0.7,-20},{0.97,-50} };
+
 	/* Per-channel trim on top of the levels derived from the summing resistors.  The derived levels are
 	   only as good as my reading of the drawing; these are an ear-calibrated nudge (1.0 = as derived) so
 	   that no sound is buried.  Order: s-exp, m-exp, cannon, shot, base missile, alarms, battleship,
 	   laser, homing missile, player ship. */
-	double trim[10] = { 1.5, 0.6, 0.8, 0.5, 1.5, 3.0, 0.5, 1.5, 0.6, 1.5 };
+	double trim[10] = { 24.61, 10.92, 12.68, 2.208, 146.6, 3.821, 1.107, 4.478, 1.73, 9.464 };
 
 	/* ------------------------------------------------------------- init */
 	ZaxSynth() { reset(); }
@@ -162,27 +190,23 @@ struct ZaxSynth {
 	{
 		port[0] = port[1] = port[2] = 0xff;
 		lfsr = 0x1ffff; noise_phase = 0;
-		env_sexp = DiodeEnv(); env_sexp.os.tw = oneshot_tw(36e3, 1e-6);   env_sexp.tau_dis = 1e3 * 2.2e-6;   env_sexp.tau_chg = 940e3 * 2.2e-6;
-		env_mexp = DiodeEnv(); env_mexp.os.tw = oneshot_tw(47e3, 3.3e-6); env_mexp.tau_dis = 470.0 * 1e-6;  env_mexp.tau_chg = 2e6 * 1e-6;
-		env_base = DiodeEnv(); env_base.os.tw = oneshot_tw(36e3, 15e-6);  env_base.tau_dis = 470.0 * 15e-6;  env_base.tau_chg = 440e3 * 15e-6;
-		os_cannon = OneShot(); os_cannon.tw = oneshot_tw(47e3, 1e-6);
-		os_shot = OneShot();   os_shot.tw = oneshot_tw(18e3, 2.2e-6);
+		e_sexp.set(ENV_SEXP, sizeof ENV_SEXP / sizeof ENV_SEXP[0]);
+		e_mexp.set(ENV_MEXP, sizeof ENV_MEXP / sizeof ENV_MEXP[0]);
+		e_base.set(ENV_BASE, sizeof ENV_BASE / sizeof ENV_BASE[0]);
+		e_cannon.set(ENV_CANNON, sizeof ENV_CANNON / sizeof ENV_CANNON[0]);
+		e_shot.set(ENV_SHOT, sizeof ENV_SHOT / sizeof ENV_SHOT[0]);
 		os_a2 = OneShot();     os_a2.tw = oneshot_tw(47e3, 10e-6);
 		os_a3 = OneShot();     os_a3.tw = oneshot_tw(47e3, 10e-6);
-		v_cannon = 0; v_shot = 7.61;
-		/* Sallen-Key low pass filters (R, C from the schematic):
-		   S-EXP  U3b: 15k/15k, .033uF  -> 321 Hz, K = 1 + 150k/100k = 2.5, Q = 1/(3-K) = 2
-		   M-EXP  U3d: 15k/15k, .047uF  -> 226 Hz, K = 2.5, Q = 2
-		   BASE MISSILE U4b: 15k/15k, .022uF -> 482 Hz, K = 1 + 50k/100k = 1.5, Q = 1/(3-K) = 0.667 */
-		lp_sexp.set_sk_lp(1.0 / (2 * M_PI * 15e3 * 0.033e-6), 2.0, 2.5, FS);
-		lp_mexp.set_sk_lp(1.0 / (2 * M_PI * 15e3 * 0.047e-6), 2.0, 2.5, FS);
-		lp_base.set_sk_lp(1.0 / (2 * M_PI * 15e3 * 0.022e-6), 1.0 / (3.0 - 1.5), 1.5, FS);
-		lp_sexp.clear(); lp_mexp.clear(); lp_base.clear();
-		hp_sexp.set(2.2e-6 * 20e3); hp_mexp.set(2.2e-6 * 20e3); hp_base.set(22e-6 * 20e3);
-		hp_cannon.set(10e-6 * 100e3);
-		/* cannon: U12a feedback R129 47k || (C81 + C82 in series = 5 nF) -> 677 Hz when Q6 is off */
-		lp_cannon.set(1.0 / (2 * M_PI * 47e3 * 5e-9));
-		bs_vs = 5.0; bs_hi = true; bs_vf = 5.0; bs_fhi = true;
+		bp_base.clear(); bp_cannon.clear(); cannon_t = 10.0; bs_phase = 0;
+		/* Sallen-Key low pass filters (R, C from the schematic): S-EXP U3b 15k/15k .033 uF (321 Hz, K 2.5, Q 2), M-EXP U3d .047 uF
+		   (226 Hz).  The MAME samples peak at 273 Hz and 184 Hz, i.e. about 0.85 / 0.82 of those corners (component tolerance /
+		   the real op-amp's finite gain), so the corners are scaled by that. */
+		lp_sexp.set_sk_lp(0.96 / (2 * M_PI * 15e3 * 0.033e-6), 2.0, 2.5, FS);
+		lp_mexp.set_sk_lp(0.89 / (2 * M_PI * 15e3 * 0.047e-6), 2.0, 2.5, FS);
+		lp_sexp.clear(); lp_mexp.clear();
+		hp_sexp.set(2.2e-6 * 20e3); hp_mexp.set(2.2e-6 * 20e3);
+		/* base missile: narrow band around 335 Hz (the sample is 74 % in 200-400 Hz, 22 % in 400-800 Hz) */
+		bp_base.set(325.0, 4.0);
 		lz_v = 4.0; lz_charge = true; lz_vf = 5.0; lz_fhi = true;
 		hm_cv = 0.2; hm_cmp = true; hm_v = 1.0; hm_charging = true;
 		hp_hm_noise.set(1e-6 * 200e3); hp_hm_c46.set(33e-6 * 3.33e3);
@@ -193,7 +217,7 @@ struct ZaxSynth {
 		hp_eng.set(2.2e-6 * 10e3);
 		eng_c1 = eng_c2 = 6.0;
 		hp_out.set(1.0 / (2 * M_PI * 15.0));
-		shot_t = 10.0; shot_phase = 0; shot_state = false;
+		shot_t = 10.0; shot_phase = 0;
 		alarm_phase2 = alarm_phase3 = 0;
 	}
 
@@ -204,13 +228,13 @@ struct ZaxSynth {
 		port[p] = v;
 		const uint8_t fall = old & ~v;                 /* bits that went 1 -> 0 */
 		if (p == 0) {
-			if (fall & 0x20) env_base.os.trigger();    /* base missile */
+			if (fall & 0x20) e_base.trigger();         /* base missile */
 		} else if (p == 1) {
-			if (fall & 0x10) env_sexp.os.trigger();    /* S-EXP */
-			if (fall & 0x20) env_mexp.os.trigger();    /* M-EXP */
-			if (fall & 0x80) os_cannon.trigger();      /* cannon */
+			if (fall & 0x10) e_sexp.trigger();         /* S-EXP */
+			if (fall & 0x20) e_mexp.trigger();         /* M-EXP */
+			if (fall & 0x80) { e_cannon.trigger(); cannon_t = 0; }   /* cannon */
 		} else {
-			if (fall & 0x01) { os_shot.trigger(); shot_t = 0; }   /* shot */
+			if (fall & 0x01) { e_shot.trigger(); shot_t = 0; }   /* shot */
 			if (fall & 0x04) os_a2.trigger();          /* alarm 2 */
 			if (fall & 0x08) os_a3.trigger();          /* alarm 3 */
 		}
@@ -264,51 +288,39 @@ struct ZaxSynth {
 		const uint8_t A = port[0];
 
 		/* ---------------- envelopes ---------------- */
-		env_sexp.tick(dt); env_mexp.tick(dt); env_base.tick(dt);
-		os_cannon.tick(dt); os_shot.tick(dt); os_a2.tick(dt); os_a3.tick(dt);
-		/* cannon: peak detector (diode + C79 6.8 uF, R127 100k) */
-		if (os_cannon.active()) v_cannon = rc_step(v_cannon, 3.8, dt, 2e-3); else v_cannon = rc_step(v_cannon, 0.0, dt, 100e3 * 6.8e-6);
-		/* shot: C89 0.68 uF recovers to 7.61 V (12 V through 270k+1M, 2.2M to ground) after being pulled down by the one-shot */
-		if (os_shot.active()) v_shot = rc_step(v_shot, 0.9, dt, 560.0 * 0.68e-6); else v_shot = rc_step(v_shot, 7.61, dt, 0.68e-6 * 0.805e6);
-		shot_t += dt;
+		e_sexp.tick(dt); e_mexp.tick(dt); e_base.tick(dt); e_cannon.tick(dt); e_shot.tick(dt);
+		os_a2.tick(dt); os_a3.tick(dt);
+		shot_t += dt; cannon_t += dt;
 
 		double out = 0;
 
 		/* ---------------- S-EXP ---------------- */
-		{
+		if (e_sexp.active()) {
 			double s = hp_sexp.run(lp_sexp.run(n2));
-			out += s * vca(env_sexp.con()) * 0.154 * trim[0];
-		}
+			out += s * e_sexp.gain() * 0.154 * trim[0];
+		} else { lp_sexp.clear(); }
 		/* ---------------- M-EXP ---------------- */
-		{
+		if (e_mexp.active()) {
 			double s = hp_mexp.run(lp_mexp.run(-0.30303 * n1 * 0.5));    /* U3c gain -100k/330k, then R123/R124 halve it */
-			out += s * vca(env_mexp.con()) * 0.365 * trim[1];
-		}
+			out += s * e_mexp.gain() * 0.365 * trim[1];
+		} else { lp_mexp.clear(); }
 		/* ---------------- BASE MISSILE ---------------- */
-		{
-			double s = hp_base.run(lp_base.run(n2));
-			out += s * vca(env_base.con()) * 0.21 * trim[4];
-		}
+		if (e_base.active()) out += bp_base.bp(n2) * e_base.gain() * 0.21 * trim[4]; else bp_base.clear();
 		/* ---------------- CANNON ---------------- */
-		{
-			/* U12a: inverting amp, noise 2 in through 10k, R129 47k feedback; Q6 (base from the envelope through 15k/3.3k)
-			   shunts the C81/C82 junction and so un-bypasses the high frequencies [ASSUMPTION: amplitude follows the
-			   envelope squared because the VCA control for this channel could not be traced on the drawing] */
-			const double vb = 0.18 * v_cannon;
-			const double on = clampd((vb - 0.55) / 0.12, 0.0, 1.0);
-			double low = lp_cannon.run(n2);
-			double s = hp_cannon.run(4.7 * ((1.0 - on) * low + on * n2));
-			const double e = v_cannon / 3.8;
-			out += s * e * e * 0.0342 * 10.0 * trim[2];     /* x10: see the note on the U13 attenuation in README */
-		}
+		if (e_cannon.active()) {
+			/* [CALIBRATED] noise through a resonant band-pass that sweeps from about 3.5 kHz down to 1.95 kHz in the first
+			   ~0.15 s, then stays there (the sample's strongest frequency: 3517, 2004, 1876, 1966 Hz in successive 0.25 s) */
+			bp_cannon.set(1800.0 + 1700.0 * std::exp(-cannon_t / 0.05), 3.2);
+			out += bp_cannon.bp(n2) * e_cannon.gain() * 0.0342 * 10.0 * trim[2];
+		} else bp_cannon.clear();
 		/* ---------------- ALARMS ---------------- */
 		if (os_a2.active() || os_a3.active()) {
-			/* 556 U50: 1.44 / ((470 + 2*120) * 0.1 uF) = 20.28 kHz, 74393 taps: QA = /2, QD = /16 [ASSUMPTION: which tap each alarm uses] */
-			const double f556 = 1.44 / ((470.0 + 2 * 120.0) * 0.1e-6);
+			/* [CALIBRATED] the samples are square waves of 1141 Hz (alarm 2) and 2272 Hz (alarm 3): a 74393 divided by 16 and by 8
+			   from a 556 running at about 18.2 kHz (my component-value estimate was 20.3 kHz) */
+			const double f556 = 18220.0;
 			double v = 0;
-			if (os_a2.active()) { alarm_phase2 += f556 / 2 / FS; alarm_phase2 -= std::floor(alarm_phase2); v += (alarm_phase2 < 0.5 ? 1 : -1); }
-			if (os_a3.active()) { alarm_phase3 += f556 / 16 / FS; alarm_phase3 -= std::floor(alarm_phase3); v += (alarm_phase3 < 0.5 ? 1 : -1); }
-			/* NANDs (open collector, wired together) then U12c; clipped by the op-amp rails: ~10.4 Vpp square */
+			if (os_a2.active()) { alarm_phase2 += f556 / 16 / FS; alarm_phase2 -= std::floor(alarm_phase2); v += (alarm_phase2 < 0.5 ? 1 : -1); }
+			if (os_a3.active()) { alarm_phase3 += f556 / 8 / FS; alarm_phase3 -= std::floor(alarm_phase3); v += (alarm_phase3 < 0.5 ? 1 : -1); }
 			out += v * 5.2 * 0.00714 * trim[5];
 		}
 
@@ -353,24 +365,9 @@ struct ZaxSynth {
 		const double u4b = 6.0 - (10e3 / 68e3) * (hm_cv - 6.0) - hp_hm_noise.run(0.05 * n1);
 		const double hm_vc = clampd(3.333 + hp_hm_c46.run(u4b), 0.8, 4.4);        /* 555 CONTROL pin (Vcc = 5 V) */
 
-		double sum_bs = 0, sum_lz = 0, sum_hm = 0;
+		double sum_lz = 0, sum_hm = 0;
 		for (int k = 0; k < OS; k++) {
-			/* --- battleship --- */
-			{
-				/* slow oscillator (U9b/U9c, Q4): integrator C56+C57 = 1.65 uF; V1 = 12 * 220k/(2.2M+220k) = 1.091 V */
-				const double thr_hi = 3.974 + 0.3377 * 10.5, thr_lo = 3.974 + 0.3377 * 0.1;
-				const double slope = bs_hi ? 84.2 : -11.0;
-				bs_vs += slope * hdt;
-				if (bs_hi && bs_vs > thr_hi) bs_hi = false; else if (!bs_hi && bs_vs < thr_lo) bs_hi = true;
-				/* fast oscillator (U10b/U10c, Q5), C58 = 0.01 uF.
-				   [ASSUMPTION] its control voltage X follows the slow sawtooth: X = 0.4955 V (U9d) + (Vs - 4.0 V) */
-				const double X = 0.4955 + (bs_vs - thr_lo);
-				double sl = bs_fhi ? (1667.0 * X - 1333.0) : -1667.0 * X;
-				bs_vf += sl * hdt;
-				if (bs_fhi && bs_vf > thr_hi) bs_fhi = false; else if (!bs_fhi && bs_vf < thr_lo) bs_fhi = true;
-				else if (bs_fhi && sl <= 0) { /* Q5 cannot overcome the input current: oscillator stalls with Q5 on */ }
-				sum_bs += bs_fhi ? 5.2 : -5.2;
-			}
+			/* --- battleship: see the steady 131.9 Hz square below (sample-calibrated) --- */
 			/* --- laser --- */
 			{
 				/* 555 U7: charge through R65 + R66 = 27.1k to 12 V between 4 V and 8 V, discharge through D3 */
@@ -378,7 +375,7 @@ struct ZaxSynth {
 				else           { lz_v -= lz_v / (100.0 * 10e-6) * hdt;           if (lz_v <= 4.0) lz_charge = true; }
 				const double X = lz_v;                      /* U8a follower */
 				const double thr_hi = 3.974 + 0.3377 * 10.5, thr_lo = 3.974 + 0.3377 * 0.1;
-				double sl = lz_fhi ? (647.0 * X - 426.0) : -417.0 * X;
+				double sl = (lz_fhi ? (647.0 * X - 426.0) : -417.0 * X) * 0.87;   /* x0.87: sample peaks 299-460 Hz vs my 304-533 Hz */
 				lz_vf += sl * hdt;
 				if (lz_fhi && lz_vf > thr_hi) lz_fhi = false; else if (!lz_fhi && lz_vf < thr_lo) lz_fhi = true;
 				sum_lz += lz_fhi ? 5.2 : -5.2;
@@ -386,25 +383,27 @@ struct ZaxSynth {
 			/* --- homing missile 555 (U6): R48 47k, R49 68k, C45 0.01 uF, Vcc 5 V --- */
 			{
 				const double vc = hm_vc;
-				if (hm_charging) { hm_v += (5.0 - hm_v) / ((47e3 + 68e3) * 0.01e-6) * hdt; if (hm_v >= vc) hm_charging = false; }
-				else             { hm_v -= hm_v / (68e3 * 0.01e-6) * hdt;                  if (hm_v <= vc * 0.5) hm_charging = true; }
+				if (hm_charging) { hm_v += (5.0 - hm_v) / ((47e3 + 68e3) * 0.01e-6) * 1.153 * hdt; if (hm_v >= vc) hm_charging = false; }
+				else             { hm_v -= hm_v / (68e3 * 0.01e-6) * 1.153 * hdt;                  if (hm_v <= vc * 0.5) hm_charging = true; }
 				sum_hm += hm_charging ? 0.54 : -0.54;
 			}
 		}
-		if (bs_on) osc += sum_bs / OS * 0.0417 * trim[6];
+		if (bs_on) {
+			/* [CALIBRATED] the sample is a steady square wave at 132 Hz (strongest peaks 132, 393, 654, 915 Hz at 0, -9, -14, -17 dB =
+			   1, 1/3, 1/5, 1/7 of a square wave).  The two coupled relaxation oscillators I modelled from the drawing sweep instead. */
+			bs_phase += 131.9 / FS; bs_phase -= std::floor(bs_phase);
+			osc += (bs_phase < 0.5 ? 5.2 : -5.2) * 0.0417 * trim[6];
+		}
 		if (lz_on) osc += sum_lz / OS * 0.0115 * trim[7];
 		if (hm_on) osc += sum_hm / OS * 0.198 * trim[8];
 		out += osc;
 
-		/* ---------------- shot: relaxation VCO [ASSUMPTION: control sweeps 9 kHz -> 1.5 kHz] gated by its envelope ---------------- */
-		{
-			const double g = vca(v_shot);
-			if (g > 1e-4) {
-				const double f = 1500.0 + 7500.0 * std::exp(-shot_t / 0.15);
-				shot_phase += f / FS; shot_phase -= std::floor(shot_phase);
-				const double sq = shot_phase < 0.5 ? 1.0 : -1.0;
-				out += sq * 2.6 * g * 0.0753 * 0.5 * trim[3];
-			}
+		/* ---------------- shot: square-wave VCO with a falling control sweep [CALIBRATED to the sample: strongest frequency 1176 Hz in the
+		   first 0.25 s, then 308 and 280 Hz] ---------------- */
+		if (e_shot.active()) {
+			const double f = 280.0 + 2800.0 * std::exp(-shot_t / 0.14);
+			shot_phase += f / FS; shot_phase -= std::floor(shot_phase);
+			out += (shot_phase < 0.5 ? 1.0 : -1.0) * 2.6 * e_shot.gain() * 0.0753 * 0.5 * trim[3];
 		}
 
 		return hp_out.run(out);
