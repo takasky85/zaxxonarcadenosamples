@@ -7,8 +7,8 @@
  *   - MM5837 digital noise source (17-bit LFSR, taps 14/17 as in MAME's mm5837.h, ~103 kHz at 12 V)
  *   - 74123 one-shots (t = 0.28 * R * C * (1 + 0.7/R[k]))          -> trigger / gate pulses
  *   - RC envelope networks with diodes                              -> the explosion / missile / shot envelopes
- *   - MB4391 voltage controlled attenuators                         -> gain = clamp((4.759 - Vcon)/1.920, 0, 1)^2
- *     (curve from the fit in MAME's nl_brdrline.cpp; it matches the envelope voltages found here)
+ *   - MB4391 voltage controlled attenuators -> modelled as an MC3340: +13 dB max, 0 dB below 3.0 V, about 45 dB per volt above 3.6 V
+ *     (treated as an MC3340: Figure 3 of its datasheet, +13 dB maximum gain)
  *   - Sallen-Key low-pass filters (U3), bilinear-transformed biquads
  *   - Op-amp / comparator relaxation oscillators with transistor switches (battleship, laser, shot)
  *   - 555 timers (laser LFO, homing missile), 556 + 74393 divider (alarms)
@@ -71,12 +71,21 @@ struct ZaxSynth {
 	};
 	static double clampd(double v, double lo, double hi) { return v < lo ? lo : v > hi ? hi : v; }
 	static double rc_step(double v, double target, double dt, double tau) { return v + (target - v) * (1.0 - std::exp(-dt / tau)); }
-	/* MB4391 voltage-controlled attenuator */
+	/* MB4391 voltage-controlled attenuator.  [ASSUMPTION] The MB4391 behaves like a Motorola MC3340 (8-pin electronic attenuator;
+	   a forum report says two MC3340s replace one MB4391, and the 680 pF on the RO pin matches the MC3340's 620 pF roll-off cap).
+	   Curve read off the MC3340 datasheet, Figure 3, for VCC = 12 V (solid line): 0 dB below about 3.0 V, a soft knee to 20 dB at
+	   3.59 V, then about 45 dB per volt (80 dB at 4.9 V).  The maximum gain is +13 dB (datasheet typical). */
+	static double vca_atten_db(double vcon)
+	{
+		double a;
+		if (vcon <= 3.0) a = 0.0;
+		else if (vcon < 3.59) a = 20.0 * std::pow((vcon - 3.0) / 0.59, 1.3);
+		else a = 20.0 + 45.0 * (vcon - 3.59);
+		return a > 100.0 ? 100.0 : a;
+	}
 	static double vca(double vcon)
 	{
-		double m = (4.759384 - vcon) / (4.759384 - 2.839579);
-		m = clampd(m, 0.0, 1.0);
-		return m * m;
+		return 4.467 * std::pow(10.0, -vca_atten_db(vcon) / 20.0);      /* +13 dB at full volume */
 	}
 	/* 74123: pulse width in seconds for R in ohms, C in farads */
 	static double oneshot_tw(double R, double C) { return 0.28 * R * C * (1.0 + 0.7 / (R / 1000.0)); }
@@ -144,7 +153,7 @@ struct ZaxSynth {
 	   only as good as my reading of the drawing; these are an ear-calibrated nudge (1.0 = as derived) so
 	   that no sound is buried.  Order: s-exp, m-exp, cannon, shot, base missile, alarms, battleship,
 	   laser, homing missile, player ship. */
-	double trim[10] = { 2.5, 1.5, 0.8, 1.0, 3.0, 1.0, 0.5, 1.0, 0.6, 4.0 };
+	double trim[10] = { 1.5, 0.6, 0.8, 0.5, 1.5, 3.0, 0.5, 1.5, 0.6, 1.5 };
 
 	/* ------------------------------------------------------------- init */
 	ZaxSynth() { reset(); }
@@ -402,12 +411,13 @@ struct ZaxSynth {
 	}
 
 	/* ------------------------------------------------------------- audio out */
-	static constexpr double MASTER = 16000.0;    /* output volts (after the summing amplifier) -> 16 bit */
+	static constexpr double MASTER = 11000.0;    /* output volts (after the summing amplifier) -> 16 bit */
 	void render(int16_t *dst, int n)
 	{
 		for (int i = 0; i < n; i++) {
 			double v = tick() * MASTER;
-			dst[i] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+			v = 30000.0 * std::tanh(v / 30000.0);                 /* gentle limiter: many sounds at once never hard-clip */
+			dst[i] = (int16_t)v;
 		}
 	}
 };

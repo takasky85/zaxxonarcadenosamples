@@ -74,8 +74,10 @@ Two tools need no ROMs:
 ## Sound: what is modelled and how sure it is
 
 Common parts: the **MM5837** noise source is a 17-bit LFSR clocked at about 103 kHz (as in MAME's `mm5837`);
-**74123** one-shot widths use `0.28·R·C·(1+0.7/R[kΩ])`; the **MB4391** voltage-controlled attenuators use the curve
-`gain = clamp((4.76 − Vcon)/1.92, 0, 1)²` from MAME's `nl_brdrline` model; the Sallen-Key filters are real biquads from the
+**74123** one-shot widths use `0.28·R·C·(1+0.7/R[kΩ])`; the **MB4391** voltage-controlled attenuators are modelled as a Motorola **MC3340** at a 12 V supply (assumption: a forum report says two MC3340s
+replace one MB4391, and the 680 pF on the MB4391's RO pin matches the MC3340's roll-off capacitor): +13 dB at full volume, 0 dB attenuation below
+about 3.0 V of control voltage, then roughly 45 dB per volt (curve read from the MC3340 datasheet, Figure 3). MAME's own MB4391 model is a
+self-described guess; the Sallen-Key filters are real biquads from the
 schematic R and C values. It is a per-sample behavioural model, not a SPICE solver.
 
 | Sound (8255 bit) | Model | Confidence |
