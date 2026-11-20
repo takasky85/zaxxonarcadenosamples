@@ -1,9 +1,9 @@
 /*
- * Super Zaxxon (Sega, 1982) - a small standalone emulator with synthesized sound.
+ * Zaxxon / Super Zaxxon (Sega, 1982) - a small standalone emulator with synthesized sound.
  *
  * The game board is emulated after MAME's zaxxon driver; the discrete analog sound board is not
  * played back from samples but calculated from a model of its circuit (zaxxon_synth.h).
- * You need to supply the ROMs yourself (MAME "szaxxon.zip").
+ * You need to supply the ROMs yourself (MAME "szaxxon.zip" or "zaxxon.zip"; the set is detected automatically).
  */
 #include <SDL3/SDL.h>
 #include <cstdio>
@@ -31,15 +31,18 @@ static Machine M;
 static void usage()
 {
 	fputs(
-"Super Zaxxon emulator with synthesized (sample-free) sound\n"
-"usage: zaxxon [options] [szaxxon.zip | rom-folder] ...\n"
+"Zaxxon / Super Zaxxon emulator with synthesized (sample-free) sound\n"
+"usage: zaxxon [options] [szaxxon.zip | zaxxon.zip | rom-folder] ...\n"
 "  With no path, a folder called 'roms' next to the program (or the current folder) is searched.\n"
 "  You can also drop a zip or a folder on the window, or press O (zip) / F (folder) to browse.\n\n"
 "  --scale N        window scale (default 3)\n"
 "  --no-rotate      do not rotate the picture 90 degrees\n"
 "  --volume X       master volume, 0..2 (default 1)\n"
-"  --lives N        3, 4 or 5 (default 3);  --free-play\n"
+"  --lives N        3, 4 or 5 (default 3);  --free-play;  --hard (Super Zaxxon difficulty)\n"
 "  --bonus N        10000, 20000, 30000 or 40000 (default 10000)\n"
+"  --cheat LIST     any of: lives,fuel,invincible  (or all);  they can also be switched in the menu\n"
+"  --integer        integer-multiple scaling only (default: fill the window, nearest-neighbour)\n"
+"  --reset-settings ignore and overwrite the saved settings\n"
 "  --sound-test     the sound board on its own (no ROMs needed): press keys to trigger every sound\n"
 "  --sound-demo F   write every sound, one after the other, to the WAV file F and exit (no ROMs needed)\n"
 "  --headless       no window or audio device; run --frames N and exit\n"
@@ -48,9 +51,11 @@ static void usage()
 "  --shot FILE      headless: save the last frame as a BMP\n"
 "  --shot-every N   headless: also save every Nth frame as FILE-<n>.bmp\n"
 "  --coin-at N      headless: insert a coin at frame N;  --start-at N presses 1P start\n"
+"  --autoplay       headless: after the start press, hold fire and wiggle the stick (for testing)\n"
 "  -h, --help       this text\n\n"
 "keys: arrows move, Z / Ctrl / Space fire, 5 coin, 1 / 2 start, F2 service (test mode),\n"
-"      P pause, R rotate, F3 reset, F11 fullscreen, F12 screenshot, + / - volume, Esc quit\n", stderr);
+"      Esc or Tab menu (cheats, DIP switches, scaling ...), P pause, R rotate, F3 reset,\n"
+"      F11 fullscreen, F12 screenshot, + / - volume\n", stderr);
 }
 
 /* ------------------------------------------------------------------ sound test */
@@ -136,8 +141,64 @@ static void SDLCALL dialog_cb(void *, const char *const *list, int)
 	if (list && list[0]) { std::lock_guard<std::mutex> l(g_pm); g_pending = list[0]; }
 }
 
+
+/* ------------------------------------------------------------------ settings */
+struct Opts {
+	int lives = 3, bonus = 10000;
+	bool free_play = false, hard = false;
+	bool inf_lives = false, inf_fuel = false, invincible = false;
+	bool integer = false, rotate = true, fullscreen = false;
+	int volume = 100;                              /* percent */
+};
+static Opts O;
+
+static uint8_t make_dsw02()
+{
+	const int b = O.bonus == 20000 ? 0x01 : O.bonus == 30000 ? 0x02 : O.bonus == 40000 ? 0x00 : 0x03;
+	const int l = O.free_play ? 0x00 : O.lives == 4 ? 0x10 : O.lives == 5 ? 0x20 : 0x30;
+	/* bits 2/3: Super Zaxxon has a difficulty switch on bit 2 (set = normal); Zaxxon leaves both unused (set) */
+	const int d = M.set_id == SET_SZAXXON ? (O.hard ? 0x00 : 0x04) : 0x0c;
+	return (uint8_t)(b | d | l | 0x40);
+}
+static void apply_opts()
+{
+	M.dsw02 = make_dsw02();
+	M.volume = O.volume / 100.0f;
+	M.cheat_lives = O.inf_lives; M.cheat_fuel = O.inf_fuel; M.cheat_invincible = O.invincible;
+}
+
+static std::string settings_path()
+{
+	char *p = SDL_GetPrefPath("zaxxonnosamples", "zaxxon");
+	std::string r = p ? std::string(p) + "settings.ini" : "";
+	SDL_free(p);
+	return r;
+}
+static void settings_load()
+{
+	const std::string path = settings_path(); if (path.empty()) return;
+	FILE *f = fopen(path.c_str(), "r"); if (!f) return;
+	char k[64]; int v;
+	while (fscanf(f, "%63[^=]=%d\n", k, &v) == 2) {
+		std::string key = k;
+		if (key == "lives") O.lives = v; else if (key == "bonus") O.bonus = v; else if (key == "free_play") O.free_play = v;
+		else if (key == "hard") O.hard = v; else if (key == "inf_lives") O.inf_lives = v; else if (key == "inf_fuel") O.inf_fuel = v;
+		else if (key == "invincible") O.invincible = v; else if (key == "integer") O.integer = v; else if (key == "rotate") O.rotate = v;
+		else if (key == "fullscreen") O.fullscreen = v; else if (key == "volume") O.volume = v;
+	}
+	fclose(f);
+}
+static void settings_save()
+{
+	const std::string path = settings_path(); if (path.empty()) return;
+	FILE *f = fopen(path.c_str(), "w"); if (!f) return;
+	fprintf(f, "lives=%d\nbonus=%d\nfree_play=%d\nhard=%d\ninf_lives=%d\ninf_fuel=%d\ninvincible=%d\ninteger=%d\nrotate=%d\nfullscreen=%d\nvolume=%d\n",
+		O.lives, O.bonus, O.free_play, O.hard, O.inf_lives, O.inf_fuel, O.invincible, O.integer, O.rotate, O.fullscreen, O.volume);
+	fclose(f);
+}
+
 /* ------------------------------------------------------------------ main */
-static bool boot(const std::vector<std::string> &paths, bool search_default, uint8_t dsw02, float volume)
+static bool boot(const std::vector<std::string> &paths, bool search_default)
 {
 	std::vector<rz::RomFile> files;
 	if (paths.empty() && search_default) {
@@ -152,21 +213,26 @@ static bool boot(const std::vector<std::string> &paths, bool search_default, uin
 		return false;
 	}
 	M.load(rs);
-	M.dsw02 = dsw02; M.volume = volume;
+	apply_opts();
 	M.reset();
 	return true;
 }
 
+enum { MI_RESUME, MI_LIVES_CHEAT, MI_FUEL_CHEAT, MI_INVINCIBLE, MI_LIVES, MI_BONUS, MI_FREEPLAY, MI_DIFF, MI_SCALE, MI_ROTATE,
+       MI_VOLUME, MI_FULLSCREEN, MI_RESET, MI_LOAD, MI_QUIT, MI_COUNT };
+
 int main(int argc, char **argv)
 {
-	int scale = 3, rotation = 1;
-	float volume = 1.0f;
-	int lives = 3, bonus = 10000; bool free_play = false;
-	bool headless = false, sound_test = false;
+	bool headless = false, sound_test = false, reset_settings = false;
 	int frames_to_run = 600, shot_every = 0, coin_at = -1, start_at = -1;
+	bool autoplay = false;
 	std::string wav_path, shot_path, demo_path;
 	std::vector<std::string> paths;
+	int scale = 3;
 
+	/* command-line values override the saved settings, so remember which were given */
+	struct Cli { int lives = -1, bonus = -1, volume = -1, free_play = -1, hard = -1, integer = -1, rotate = -1;
+	             bool inf_lives = false, inf_fuel = false, invincible = false; } cli;
 	for (int i = 1; i < argc; i++) {
 		std::string a = argv[i];
 		auto next = [&](const char *n) -> const char * {
@@ -175,11 +241,21 @@ int main(int argc, char **argv)
 		};
 		if (a == "-h" || a == "--help") { usage(); return 0; }
 		else if (a == "--scale") scale = std::max(1, atoi(next("--scale")));
-		else if (a == "--no-rotate") rotation = 0;
-		else if (a == "--volume") volume = (float)atof(next("--volume"));
-		else if (a == "--lives") lives = atoi(next("--lives"));
-		else if (a == "--free-play") free_play = true;
-		else if (a == "--bonus") bonus = atoi(next("--bonus"));
+		else if (a == "--no-rotate") cli.rotate = 0;
+		else if (a == "--volume") cli.volume = (int)(atof(next("--volume")) * 100);
+		else if (a == "--lives") cli.lives = atoi(next("--lives"));
+		else if (a == "--free-play") cli.free_play = 1;
+		else if (a == "--hard") cli.hard = 1;
+		else if (a == "--bonus") cli.bonus = atoi(next("--bonus"));
+		else if (a == "--integer") cli.integer = 1;
+		else if (a == "--reset-settings") reset_settings = true;
+		else if (a == "--cheat") {
+			std::string v = next("--cheat");
+			if (v.find("all") != std::string::npos) cli.inf_lives = cli.inf_fuel = cli.invincible = true;
+			if (v.find("lives") != std::string::npos) cli.inf_lives = true;
+			if (v.find("fuel") != std::string::npos) cli.inf_fuel = true;
+			if (v.find("invinc") != std::string::npos) cli.invincible = true;
+		}
 		else if (a == "--sound-test") sound_test = true;
 		else if (a == "--sound-demo") demo_path = next("--sound-demo");
 		else if (a == "--headless") headless = true;
@@ -189,58 +265,75 @@ int main(int argc, char **argv)
 		else if (a == "--shot-every") shot_every = atoi(next("--shot-every"));
 		else if (a == "--coin-at") coin_at = atoi(next("--coin-at"));
 		else if (a == "--start-at") start_at = atoi(next("--start-at"));
+		else if (a == "--autoplay") autoplay = true;
 		else if (a.size() > 1 && a[0] == '-') { fprintf(stderr, "unknown option %s (try --help)\n", a.c_str()); return 1; }
 		else paths.push_back(a);
 	}
 	if (!demo_path.empty()) { sound_demo(demo_path.c_str()); return 0; }
 
-	uint8_t dsw02;
-	{
-		int b = bonus == 20000 ? 0x01 : bonus == 30000 ? 0x02 : bonus == 40000 ? 0x00 : 0x03;
-		int l = free_play ? 0x00 : lives == 4 ? 0x10 : lives == 5 ? 0x20 : 0x30;
-		dsw02 = (uint8_t)(b | 0x04 | l | 0x40);
-	}
+	if (!headless && !reset_settings) settings_load();
+	if (cli.lives >= 0) O.lives = cli.lives;
+	if (cli.bonus >= 0) O.bonus = cli.bonus;
+	if (cli.volume >= 0) O.volume = cli.volume;
+	if (cli.free_play >= 0) O.free_play = cli.free_play;
+	if (cli.hard >= 0) O.hard = cli.hard;
+	if (cli.integer >= 0) O.integer = cli.integer;
+	if (cli.rotate >= 0) O.rotate = cli.rotate;
+	if (cli.inf_lives) O.inf_lives = true;
+	if (cli.inf_fuel) O.inf_fuel = true;
+	if (cli.invincible) O.invincible = true;
 
 	/* ---------------- headless ---------------- */
 	if (headless) {
-		if (!boot(paths, true, dsw02, volume)) {
-			fprintf(stderr, "Could not find all the ROMs (szaxxon.zip). Pass the zip or folder on the command line.\n");
+		if (!boot(paths, true)) {
+			fprintf(stderr, "Could not find all the ROMs (szaxxon.zip or zaxxon.zip). Pass the zip or folder on the command line.\n");
 			return 1;
 		}
+		fprintf(stderr, "set: %s\n", SET_NAMES[M.set_id]);
+		const int rot = O.rotate ? 1 : 0;
 		std::vector<int16_t> au;
 		for (int f = 0; f < frames_to_run; f++) {
-			M.sw100 = 0;
+			M.sw100 = 0; M.sw00 = 0;
 			if (f == coin_at) M.coin_pressed(0);
 			if (start_at >= 0 && f >= start_at && f < start_at + 8) M.sw100 |= 0x04;
+			if (autoplay && start_at >= 0 && f > start_at + 120) {
+				if ((f / 40) & 1) M.sw00 |= 0x01; else M.sw00 |= 0x02;
+				if ((f / 7) & 1) M.sw00 |= 0x10;
+				if ((f / 90) & 1) M.sw00 |= 0x08; else M.sw00 |= 0x04;
+			}
 			M.run_frame();
 			if (!wav_path.empty()) au.insert(au.end(), M.audio.begin(), M.audio.end());
 			if (shot_every > 0 && !shot_path.empty() && f % shot_every == 0) {
-				std::vector<uint32_t> v; int w, h; make_view(M.fb, rotation, v, w, h);
+				std::vector<uint32_t> v; int w, h; make_view(M.fb, rot, v, w, h);
 				char n[512]; snprintf(n, sizeof n, "%s-%d.bmp", shot_path.c_str(), f);
 				write_bmp(n, v.data(), w, h);
 			}
+			if (autoplay && f % 600 == 0) fprintf(stderr, "frame %d  lives byte %02x  fuel byte %02x\n", f, M.ram[(M.set_id == SET_SZAXXON ? 0x6066 : 0x6067) - 0x6000], M.ram[(M.set_id == SET_SZAXXON ? 0x62b2 : 0x62b1) - 0x6000]);
 		}
-		if (!shot_path.empty()) { std::vector<uint32_t> v; int w, h; make_view(M.fb, rotation, v, w, h); write_bmp(shot_path.c_str(), v.data(), w, h); }
+		if (!shot_path.empty()) { std::vector<uint32_t> v; int w, h; make_view(M.fb, rot, v, w, h); write_bmp(shot_path.c_str(), v.data(), w, h); }
 		if (!wav_path.empty()) write_wav(wav_path.c_str(), au);
 		return 0;
 	}
 
 	/* ---------------- windowed ---------------- */
-	bool have_game = false;
-	if (!sound_test) have_game = boot(paths, true, dsw02, volume);
-
 	if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) { fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1; }
 	SDL_InitSubSystem(SDL_INIT_GAMEPAD);
 	SDL_SetHint(SDL_HINT_FORCE_RAISEWINDOW, "1");
-	const int vw = rotation ? SCR_H : SCR_W, vh = rotation ? SCR_W : SCR_H;
-	SDL_Window *win = SDL_CreateWindow(sound_test ? "Super Zaxxon - sound test" : "Super Zaxxon", vw * scale, vh * scale, SDL_WINDOW_RESIZABLE);
+	bool have_game = false;
+	if (!sound_test) have_game = boot(paths, true);
+	apply_opts();
+
+	int cur_w = O.rotate ? SCR_H : SCR_W, cur_h = O.rotate ? SCR_W : SCR_H;
+	auto base_title = [&]() { return sound_test ? std::string("Zaxxon - sound test") : have_game ? std::string(SET_NAMES[M.set_id]) : std::string("Zaxxon"); };
+	SDL_Window *win = SDL_CreateWindow(base_title().c_str(), cur_w * scale, cur_h * scale, SDL_WINDOW_RESIZABLE | (O.fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
 	SDL_Renderer *ren = win ? SDL_CreateRenderer(win, nullptr) : nullptr;
 	if (!win || !ren) { fprintf(stderr, "window/renderer: %s\n", SDL_GetError()); return 1; }
 	SDL_SetRenderVSync(ren, 1);
 	SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 256, 256);
-	SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_LINEAR);
-	int cur_w = vw, cur_h = vh;
-	auto set_logical = [&]() { SDL_SetRenderLogicalPresentation(ren, cur_w, cur_h, SDL_LOGICAL_PRESENTATION_LETTERBOX); };
+	SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_NEAREST);              /* nearest-neighbour only, never filtered */
+	auto set_logical = [&]() {
+		SDL_SetRenderLogicalPresentation(ren, cur_w, cur_h, O.integer ? SDL_LOGICAL_PRESENTATION_INTEGER_SCALE : SDL_LOGICAL_PRESENTATION_LETTERBOX);
+	};
 	set_logical();
 
 	SDL_AudioSpec spec; SDL_zero(spec);
@@ -256,8 +349,8 @@ int main(int argc, char **argv)
 	{ int n = 0; SDL_JoystickID *ids = SDL_GetGamepads(&n); for (int i = 0; i < n; i++) open_pad(ids[i]); SDL_free(ids); }
 
 	SoundTest st;
-	bool running = true, paused = false, prev_coin = false, prev_svc = false;
-	int shot_n = 0;
+	bool running = true, paused = false, prev_coin = false, prev_svc = false, menu = false;
+	int msel = 0, shot_n = 0;
 	std::vector<uint32_t> view;
 	Uint64 next_ns = SDL_GetTicksNS();
 
@@ -265,7 +358,57 @@ int main(int argc, char **argv)
 		SDL_SetRenderDrawColor(ren, (Uint8)r, (Uint8)g, (Uint8)b, 255);
 		SDL_RenderDebugText(ren, x, y, s);
 	};
-	auto apply_volume = [&]() { M.volume = volume; };
+	auto set_rotate = [&](bool r) { O.rotate = r; cur_w = r ? SCR_H : SCR_W; cur_h = r ? SCR_W : SCR_H; set_logical(); };
+	auto set_fullscreen = [&](bool f) { O.fullscreen = f; SDL_SetWindowFullscreen(win, f); };
+	auto open_pick_zip = [&]() { static const SDL_DialogFileFilter f[] = { { "ROM zip", "zip" } }; SDL_ShowOpenFileDialog(dialog_cb, nullptr, win, f, 1, nullptr, false); };
+
+	/* ---- menu ---- */
+	auto item_text = [&](int i, char *b, size_t n) {
+		auto onoff = [](bool v) { return v ? "ON" : "OFF"; };
+		switch (i) {
+		case MI_RESUME:        snprintf(b, n, "Resume"); break;
+		case MI_LIVES_CHEAT:   snprintf(b, n, "Infinite lives  %s", onoff(O.inf_lives)); break;
+		case MI_FUEL_CHEAT:    snprintf(b, n, "Infinite fuel   %s", onoff(O.inf_fuel)); break;
+		case MI_INVINCIBLE:    snprintf(b, n, "Invincible      %s", onoff(O.invincible)); break;
+		case MI_LIVES:         snprintf(b, n, "Lives           %d", O.lives); break;
+		case MI_BONUS:         snprintf(b, n, "Bonus ship  %d", O.bonus); break;
+		case MI_FREEPLAY:      snprintf(b, n, "Free play       %s", onoff(O.free_play)); break;
+		case MI_DIFF:          snprintf(b, n, "Difficulty    %s", M.set_id == SET_SZAXXON ? (O.hard ? "Hard" : "Normal") : "n/a"); break;
+		case MI_SCALE:         snprintf(b, n, "Scaling  %s", O.integer ? "Integer" : "Fill window"); break;
+		case MI_ROTATE:        snprintf(b, n, "Rotate screen   %s", onoff(O.rotate)); break;
+		case MI_VOLUME:        snprintf(b, n, "Volume          %d%%", O.volume); break;
+		case MI_FULLSCREEN:    snprintf(b, n, "Fullscreen      %s", onoff(O.fullscreen)); break;
+		case MI_RESET:         snprintf(b, n, "Reset game"); break;
+		case MI_LOAD:          snprintf(b, n, "Load ROM zip..."); break;
+		case MI_QUIT:          snprintf(b, n, "Quit"); break;
+		}
+	};
+	auto change = [&](int i, int dir) {      /* dir: -1 left, +1 right / enter */
+		switch (i) {
+		case MI_RESUME: menu = false; break;
+		case MI_LIVES_CHEAT: O.inf_lives = !O.inf_lives; break;
+		case MI_FUEL_CHEAT:  O.inf_fuel = !O.inf_fuel; break;
+		case MI_INVINCIBLE:  O.invincible = !O.invincible; break;
+		case MI_LIVES:       O.lives = std::max(3, std::min(5, O.lives + dir)); break;
+		case MI_BONUS:       O.bonus = std::max(10000, std::min(40000, O.bonus + 10000 * dir)); break;
+		case MI_FREEPLAY:    O.free_play = !O.free_play; break;
+		case MI_DIFF:        if (M.set_id == SET_SZAXXON) O.hard = !O.hard; break;
+		case MI_SCALE:       O.integer = !O.integer; set_logical(); break;
+		case MI_ROTATE:      set_rotate(!O.rotate); break;
+		case MI_VOLUME:      O.volume = std::max(0, std::min(200, O.volume + 10 * dir)); break;
+		case MI_FULLSCREEN:  set_fullscreen(!O.fullscreen); break;
+		case MI_RESET:       if (have_game) { M.reset(); menu = false; } break;
+		case MI_LOAD:        open_pick_zip(); break;
+		case MI_QUIT:        running = false; break;
+		}
+		apply_opts();
+		settings_save();
+	};
+	auto menu_nav = [&](int dy, int dx, bool enter) {
+		if (dy) msel = (msel + dy + MI_COUNT) % MI_COUNT;
+		if (dx) change(msel, dx);
+		if (enter) change(msel, 1);
+	};
 
 	while (running) {
 		SDL_Event ev;
@@ -279,21 +422,42 @@ int main(int argc, char **argv)
 			else if (ev.type == SDL_EVENT_DROP_FILE && !sound_test) {
 				std::lock_guard<std::mutex> l(g_pm); g_pending = ev.drop.data ? ev.drop.data : "";
 			}
+			else if (ev.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && !sound_test) {
+				const int b = ev.gbutton.button;
+				if (menu) {
+					if (b == SDL_GAMEPAD_BUTTON_DPAD_UP) menu_nav(-1, 0, false);
+					else if (b == SDL_GAMEPAD_BUTTON_DPAD_DOWN) menu_nav(1, 0, false);
+					else if (b == SDL_GAMEPAD_BUTTON_DPAD_LEFT) menu_nav(0, -1, false);
+					else if (b == SDL_GAMEPAD_BUTTON_DPAD_RIGHT) menu_nav(0, 1, false);
+					else if (b == SDL_GAMEPAD_BUTTON_SOUTH) menu_nav(0, 0, true);
+					else if (b == SDL_GAMEPAD_BUTTON_EAST || b == SDL_GAMEPAD_BUTTON_START || b == SDL_GAMEPAD_BUTTON_NORTH || b == SDL_GAMEPAD_BUTTON_GUIDE) menu = false;
+				} else if (b == SDL_GAMEPAD_BUTTON_NORTH || b == SDL_GAMEPAD_BUTTON_GUIDE) { menu = true; msel = 0; }
+			}
+			else if (ev.type == SDL_EVENT_KEY_DOWN && menu && !sound_test) {
+				const SDL_Keycode k = ev.key.key;
+				if (k == SDLK_UP) menu_nav(-1, 0, false);
+				else if (k == SDLK_DOWN) menu_nav(1, 0, false);
+				else if (k == SDLK_LEFT) menu_nav(0, -1, false);
+				else if (k == SDLK_RIGHT) menu_nav(0, 1, false);
+				else if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE || k == SDLK_Z) menu_nav(0, 0, true);
+				else if (k == SDLK_ESCAPE || k == SDLK_TAB) menu = false;
+			}
 			else if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat) {
 				const SDL_Keycode k = ev.key.key;
-				if (k == SDLK_ESCAPE) running = false;
+				if (k == SDLK_ESCAPE) { if (sound_test) running = false; else { menu = true; msel = 0; } }
+				else if (k == SDLK_TAB && !sound_test) { menu = true; msel = 0; }
 				else if (k == SDLK_P) paused = !paused;
-				else if (k == SDLK_R && !sound_test) { rotation = !rotation; cur_w = rotation ? SCR_H : SCR_W; cur_h = rotation ? SCR_W : SCR_H; set_logical(); }
+				else if (k == SDLK_R && !sound_test) { set_rotate(!O.rotate); settings_save(); }
 				else if (k == SDLK_F3 && have_game) M.reset();
-				else if (k == SDLK_F11) SDL_SetWindowFullscreen(win, !(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN));
-				else if (k == SDLK_EQUALS || k == SDLK_PLUS || k == SDLK_KP_PLUS) { volume = std::min(2.0f, volume + 0.1f); apply_volume(); }
-				else if (k == SDLK_MINUS || k == SDLK_KP_MINUS) { volume = std::max(0.0f, volume - 0.1f); apply_volume(); }
+				else if (k == SDLK_F11) { set_fullscreen(!(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN)); settings_save(); }
+				else if (k == SDLK_EQUALS || k == SDLK_PLUS || k == SDLK_KP_PLUS) { O.volume = std::min(200, O.volume + 10); apply_opts(); }
+				else if (k == SDLK_MINUS || k == SDLK_KP_MINUS) { O.volume = std::max(0, O.volume - 10); apply_opts(); }
 				else if (k == SDLK_F12 && have_game) {
-					make_view(M.fb, rotation, view, cur_w, cur_h);
+					int w, h; make_view(M.fb, O.rotate ? 1 : 0, view, w, h);
 					char n[64]; snprintf(n, sizeof n, "zaxxon-%03d.bmp", shot_n++);
-					write_bmp(n, view.data(), cur_w, cur_h); fprintf(stderr, "saved %s\n", n);
+					write_bmp(n, view.data(), w, h); fprintf(stderr, "saved %s\n", n);
 				}
-				else if (k == SDLK_O && !sound_test) { static const SDL_DialogFileFilter f[] = { { "ROM zip", "zip" } }; SDL_ShowOpenFileDialog(dialog_cb, nullptr, win, f, 1, nullptr, false); }
+				else if (k == SDLK_O && !sound_test) open_pick_zip();
 				else if (k == SDLK_F && !sound_test) SDL_ShowOpenFolderDialog(dialog_cb, nullptr, win, nullptr, false);
 				if (sound_test) {
 					for (const SoundItem &it : SOUND_ITEMS) if (it.key == k) st.press(it);
@@ -308,8 +472,8 @@ int main(int argc, char **argv)
 		/* a path chosen by drop / dialog */
 		std::string pend; { std::lock_guard<std::mutex> l(g_pm); pend.swap(g_pending); }
 		if (!pend.empty()) {
-			if (boot({ pend }, false, dsw02, volume)) { have_game = true; SDL_SetWindowTitle(win, "Super Zaxxon"); if (as) SDL_ClearAudioStream(as); }
-			else SDL_SetWindowTitle(win, "Super Zaxxon - those ROMs were not recognised");
+			if (boot({ pend }, false)) { have_game = true; SDL_SetWindowTitle(win, base_title().c_str()); if (as) SDL_ClearAudioStream(as); }
+			else SDL_SetWindowTitle(win, "Zaxxon - those ROMs were not recognised");
 		}
 
 		/* pacing: keep about two frames of audio queued */
@@ -331,64 +495,90 @@ int main(int argc, char **argv)
 			int y = 8;
 			text(6, (float)y, "SOUND TEST", 255, 255, 0); y += 14;
 			for (const SoundItem &it : SOUND_ITEMS) {
-				const int b = it.bit == 0x80 ? 7 : it.bit == 0x40 ? 6 : it.bit == 0x20 ? 5 : it.bit == 0x10 ? 4 : it.bit == 8 ? 3 : it.bit == 4 ? 2 : it.bit == 2 ? 1 : 0;
-				const bool on = !(st.port[it.port] & it.bit); (void)b;
+				const bool on = !(st.port[it.port] & it.bit);
 				text(6, (float)y, it.name, on ? 255 : 200, on ? 255 : 200, on ? 0 : 200); y += 11;
 			}
 			char t[64]; snprintf(t, sizeof t, "4  Player ship %s", st.ship_on ? "(on)" : "(off)"); text(6, (float)y, t, st.ship_on ? 255 : 200, st.ship_on ? 255 : 200, st.ship_on ? 0 : 200); y += 11;
 			snprintf(t, sizeof t, "5  Ship A/B bits: %d", st.ship_ab); text(6, (float)y, t, 200, 200, 200); y += 11;
 			text(6, (float)y, "Space  silence all", 200, 200, 200); y += 11;
 			text(6, (float)y, "+ -    volume", 200, 200, 200);
-		} else if (!have_game) {
-			text(8, 24, "No ROMs found.", 255, 255, 0);
-			text(8, 44, "Drop szaxxon.zip (or its", 220, 220, 220);
-			text(8, 54, "folder) on this window,", 220, 220, 220);
-			text(8, 64, "press O to pick the zip,", 220, 220, 220);
-			text(8, 74, "or F to pick a folder.", 220, 220, 220);
-			if (as) { int16_t z[FRAME_SMP] = {}; SDL_PutAudioStreamData(as, z, sizeof z); }
 		} else {
-			uint8_t s0 = 0, s100 = 0;
-			const bool *k = SDL_GetKeyboardState(nullptr);
-			bool coin = k[SDL_SCANCODE_5] || k[SDL_SCANCODE_6], svc = k[SDL_SCANCODE_F2];
-			if (k[SDL_SCANCODE_RIGHT]) s0 |= 0x01;
-			if (k[SDL_SCANCODE_LEFT])  s0 |= 0x02;
-			if (k[SDL_SCANCODE_DOWN])  s0 |= 0x04;
-			if (k[SDL_SCANCODE_UP])    s0 |= 0x08;
-			if (k[SDL_SCANCODE_Z] || k[SDL_SCANCODE_LCTRL] || k[SDL_SCANCODE_RCTRL] || k[SDL_SCANCODE_SPACE]) s0 |= 0x10;
-			if (k[SDL_SCANCODE_1]) s100 |= 0x04;
-			if (k[SDL_SCANCODE_2]) s100 |= 0x08;
-			for (SDL_Gamepad *g : pads) {
-				const int ax = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX), ay = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY);
-				if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_DPAD_RIGHT) || ax > 14500) s0 |= 0x01;
-				if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_DPAD_LEFT)  || ax < -14500) s0 |= 0x02;
-				if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_DPAD_DOWN)  || ay > 14500) s0 |= 0x04;
-				if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_DPAD_UP)    || ay < -14500) s0 |= 0x08;
-				if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_SOUTH) || SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_EAST) || SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_WEST)) s0 |= 0x10;
-				if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_START)) s100 |= 0x04;
-				if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) s100 |= 0x08;
-				if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_BACK) || SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) coin = true;
-			}
-			if (coin && !prev_coin) M.coin_pressed(0);
-			if (svc && !prev_svc) M.service_nmi();
-			prev_coin = coin; prev_svc = svc;
-			M.sw00 = s0; M.sw01 = 0; M.sw100 = s100;
-			if (!paused) {
-				M.run_frame();
-				if (as) SDL_PutAudioStreamData(as, M.audio.data(), (int)(M.audio.size() * sizeof(int16_t)));
-				for (int extra = 0; extra < 3 && as && SDL_GetAudioStreamQueued(as) < Q_LOW; extra++) {
-					M.run_frame();
-					SDL_PutAudioStreamData(as, M.audio.data(), (int)(M.audio.size() * sizeof(int16_t)));
+			if (have_game) {
+				uint8_t s0 = 0, s100 = 0;
+				const bool *k = SDL_GetKeyboardState(nullptr);
+				bool coin = k[SDL_SCANCODE_5] || k[SDL_SCANCODE_6], svc = k[SDL_SCANCODE_F2];
+				if (k[SDL_SCANCODE_RIGHT]) s0 |= 0x01;
+				if (k[SDL_SCANCODE_LEFT])  s0 |= 0x02;
+				if (k[SDL_SCANCODE_DOWN])  s0 |= 0x04;
+				if (k[SDL_SCANCODE_UP])    s0 |= 0x08;
+				if (k[SDL_SCANCODE_Z] || k[SDL_SCANCODE_LCTRL] || k[SDL_SCANCODE_RCTRL] || k[SDL_SCANCODE_SPACE]) s0 |= 0x10;
+				if (k[SDL_SCANCODE_1]) s100 |= 0x04;
+				if (k[SDL_SCANCODE_2]) s100 |= 0x08;
+				for (SDL_Gamepad *g : pads) {
+					const int ax = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX), ay = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY);
+					if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_DPAD_RIGHT) || ax > 14500) s0 |= 0x01;
+					if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_DPAD_LEFT)  || ax < -14500) s0 |= 0x02;
+					if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_DPAD_DOWN)  || ay > 14500) s0 |= 0x04;
+					if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_DPAD_UP)    || ay < -14500) s0 |= 0x08;
+					if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_SOUTH) || SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_EAST) || SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_WEST)) s0 |= 0x10;
+					if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_START)) s100 |= 0x04;
+					if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) s100 |= 0x08;
+					if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_BACK) || SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) coin = true;
 				}
+				if (menu) { s0 = s100 = 0; coin = svc = false; }
+				if (coin && !prev_coin) M.coin_pressed(0);
+				if (svc && !prev_svc) M.service_nmi();
+				prev_coin = coin; prev_svc = svc;
+				M.sw00 = s0; M.sw01 = 0; M.sw100 = s100;
+				if (!paused && !menu) {
+					M.run_frame();
+					if (as) SDL_PutAudioStreamData(as, M.audio.data(), (int)(M.audio.size() * sizeof(int16_t)));
+					for (int extra = 0; extra < 3 && as && SDL_GetAudioStreamQueued(as) < Q_LOW; extra++) {
+						M.run_frame();
+						SDL_PutAudioStreamData(as, M.audio.data(), (int)(M.audio.size() * sizeof(int16_t)));
+					}
+				} else SDL_Delay(8);
+				int w, h; make_view(M.fb, O.rotate ? 1 : 0, view, w, h);
+				SDL_Rect r = { 0, 0, w, h };
+				SDL_UpdateTexture(tex, &r, view.data(), w * 4);
+				SDL_FRect src = { 0, 0, (float)w, (float)h };
+				SDL_RenderTexture(ren, tex, &src, nullptr);
+			} else {
+				text(8, 24, "No ROMs found.", 255, 255, 0);
+				text(8, 44, "Drop szaxxon.zip or", 220, 220, 220);
+				text(8, 54, "zaxxon.zip (or its", 220, 220, 220);
+				text(8, 64, "folder) on this window,", 220, 220, 220);
+				text(8, 74, "press O to pick the zip,", 220, 220, 220);
+				text(8, 84, "or F to pick a folder.", 220, 220, 220);
+				text(8, 104, "Esc / Tab: menu", 160, 160, 160);
+				if (as) { int16_t z[FRAME_SMP] = {}; SDL_PutAudioStreamData(as, z, sizeof z); }
 			}
-			int w, h; make_view(M.fb, rotation, view, w, h);
-			SDL_Rect r = { 0, 0, w, h };
-			SDL_UpdateTexture(tex, &r, view.data(), w * 4);
-			SDL_FRect src = { 0, 0, (float)w, (float)h };
-			SDL_RenderTexture(ren, tex, &src, nullptr);
+			if (menu) {
+				SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+				SDL_SetRenderDrawColor(ren, 0, 0, 0, 215);
+				SDL_RenderFillRect(ren, nullptr);
+				SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
+				float y = 10;
+				text(8, y, have_game ? SET_NAMES[M.set_id] : "Zaxxon", 255, 255, 0); y += 8;
+				text(8, y, "-----------------------", 120, 120, 120); y += 12;
+				for (int i = 0; i < MI_COUNT; i++) {
+					char b[64]; item_text(i, b, sizeof b);
+					const bool on = i == msel;
+					if (on) text(0, y, ">", 255, 255, 0);
+					text(10, y, b, on ? 255 : 210, on ? 255 : 210, on ? 0 : 210);
+					y += (i == MI_RESUME || i == MI_INVINCIBLE || i == MI_DIFF || i == MI_FULLSCREEN) ? 17 : 11;
+				}
+				y += 4;
+				text(8, y, "Up/Down choose", 130, 130, 130); y += 10;
+				text(8, y, "Left/Right/Enter change", 130, 130, 130); y += 10;
+				text(8, y, "Esc / Tab close", 130, 130, 130); y += 10;
+				text(8, y, "Lives/bonus: next game", 130, 130, 130);
+			}
 		}
 		SDL_RenderPresent(ren);
 	}
 
+	settings_save();
 	for (SDL_Gamepad *g : pads) SDL_CloseGamepad(g);
 	if (as) SDL_DestroyAudioStream(as);
 	SDL_DestroyTexture(tex);

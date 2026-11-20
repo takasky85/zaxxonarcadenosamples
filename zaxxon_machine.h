@@ -57,21 +57,57 @@ static const RomSpec SZAXXON_ROMS[] = {
 };
 static constexpr int N_SZAXXON_ROMS = sizeof(SZAXXON_ROMS) / sizeof(SZAXXON_ROMS[0]);
 
-struct RomSet { std::vector<uint8_t> r[RG_COUNT]; };
+/* MAME "zaxxon" (set 1): the same board without the 315-5013 CPU, so the program ROMs are plain */
+static const RomSpec ZAXXON_ROMS[] = {
+	{ "zaxxon_rom3d.u27", 0x6e2b4a30, 0x2000, RG_MAIN, 0x0000 },
+	{ "zaxxon_rom2d.u28", 0x1c9ea398, 0x2000, RG_MAIN, 0x2000 },
+	{ "zaxxon_rom1d.u29", 0x1c123ef9, 0x1000, RG_MAIN, 0x4000 },
+	{ "zaxxon_rom14.u68", 0x07bf8c52, 0x0800, RG_TX,   0x0000 },
+	{ "zaxxon_rom15.u69", 0xc215edcb, 0x0800, RG_TX,   0x0800 },
+	{ "zaxxon_rom6.u113", 0x6e07bb68, 0x2000, RG_BG,   0x0000 },
+	{ "zaxxon_rom5.u112", 0x0a5bce6a, 0x2000, RG_BG,   0x2000 },
+	{ "zaxxon_rom4.u111", 0xa5bf1465, 0x2000, RG_BG,   0x4000 },
+	{ "zaxxon_rom11.u77", 0xeaf0dd4b, 0x2000, RG_SPR,  0x0000 },
+	{ "zaxxon_rom12.u78", 0x1c5369c7, 0x2000, RG_SPR,  0x2000 },
+	{ "zaxxon_rom13.u79", 0xab4e8a9a, 0x2000, RG_SPR,  0x4000 },
+	{ "zaxxon_rom8.u91",  0x28d65063, 0x2000, RG_MAP,  0x0000 },
+	{ "zaxxon_rom7.u90",  0x6284c200, 0x2000, RG_MAP,  0x2000 },
+	{ "zaxxon_rom10.u93", 0xa95e61fd, 0x2000, RG_MAP,  0x4000 },
+	{ "zaxxon_rom9.u92",  0x7e42691f, 0x2000, RG_MAP,  0x6000 },
+	{ "mro16.u76",        0x6cc6695b, 0x0100, RG_PROM, 0x0000 },
+	{ "zaxxon.u72",       0xdeaa21f7, 0x0100, RG_PROM, 0x0100 },
+};
+static constexpr int N_ZAXXON_ROMS = sizeof(ZAXXON_ROMS) / sizeof(ZAXXON_ROMS[0]);
 
-/* match every ROM by CRC32 (file names do not matter); returns false and lists what is missing */
+enum { SET_SZAXXON = 0, SET_ZAXXON = 1 };
+static const char *const SET_NAMES[] = { "Super Zaxxon", "Zaxxon" };
+
+struct RomSet { std::vector<uint8_t> r[RG_COUNT]; int set = SET_SZAXXON; };
+
+/* match every ROM by CRC32 (file names do not matter) against both sets; returns false and lists what is
+   missing from the set that came closest */
 static bool load_roms(const std::vector<rz::RomFile> &files, RomSet &rs, std::string &missing)
 {
-	for (int g = 0; g < RG_COUNT; g++) rs.r[g].assign(REGION_SIZE[g], 0);
-	bool ok = true;
-	for (int i = 0; i < N_SZAXXON_ROMS; i++) {
-		const RomSpec &s = SZAXXON_ROMS[i];
-		const rz::RomFile *hit = nullptr;
-		for (auto &f : files) if (f.crc == s.crc && f.data.size() == s.size) { hit = &f; break; }
-		if (!hit) { ok = false; missing += std::string("  ") + s.name + "\n"; continue; }
-		memcpy(rs.r[s.region].data() + s.offset, hit->data.data(), s.size);
+	struct Cand { const RomSpec *specs; int n; int set; };
+	const Cand cands[2] = { { SZAXXON_ROMS, N_SZAXXON_ROMS, SET_SZAXXON }, { ZAXXON_ROMS, N_ZAXXON_ROMS, SET_ZAXXON } };
+	int best_hits = -1; std::string best_missing;
+	for (const Cand &c : cands) {
+		RomSet t; for (int g = 0; g < RG_COUNT; g++) t.r[g].assign(REGION_SIZE[g], 0);
+		t.set = c.set;
+		int hits = 0; std::string miss;
+		for (int i = 0; i < c.n; i++) {
+			const RomSpec &sp = c.specs[i];
+			const rz::RomFile *hit = nullptr;
+			for (auto &f : files) if (f.crc == sp.crc && f.data.size() == sp.size) { hit = &f; break; }
+			if (!hit) { miss += std::string("  ") + sp.name + "\n"; continue; }
+			memcpy(t.r[sp.region].data() + sp.offset, hit->data.data(), sp.size);
+			hits++;
+		}
+		if (hits == c.n) { rs = t; return true; }
+		if (hits > best_hits) { best_hits = hits; best_missing = std::string("(closest match: ") + SET_NAMES[c.set] + ")\n" + miss; }
 	}
-	return ok;
+	missing += best_missing;
+	return false;
 }
 
 /* ===================================================================== */
@@ -127,6 +163,16 @@ struct Machine {
 	uint8_t sw00 = 0, sw01 = 0, sw100 = 0;/* live input state (active high) */
 	uint8_t dsw02 = 0x77, dsw03 = 0x33;   /* DIP switches (MAME defaults: 3 lives, bonus 10000, 1C/1C) */
 	uint8_t coin_counter[2] = {0, 0};
+	int     set_id = SET_SZAXXON;
+	/* cheats (the MAME cheat-file addresses): RAM bytes forced once per frame */
+	bool    cheat_lives = false, cheat_fuel = false, cheat_invincible = false;
+	void apply_cheats()
+	{
+		/* Infinite lives 03, infinite fuel 7F, invincibility 00 (addresses differ by one between the sets) */
+		if (cheat_lives)      ram[(set_id == SET_SZAXXON ? 0x6066 : 0x6067) - 0x6000] = 0x03;
+		if (cheat_fuel)       ram[(set_id == SET_SZAXXON ? 0x62b2 : 0x62b1) - 0x6000] = 0x7f;
+		if (cheat_invincible) ram[0x6407 - 0x6000] = 0x00;
+	}
 
 	/* 8255: mode 0, all outputs */
 	uint8_t ppi_out[3] = {0, 0, 0};
@@ -160,7 +206,9 @@ struct Machine {
 
 	void load(const RomSet &rs)
 	{
-		decrypt_315_5013(rs.r[RG_MAIN].data(), rom, opc, 0x6000);
+		set_id = rs.set;
+		if (set_id == SET_SZAXXON) decrypt_315_5013(rs.r[RG_MAIN].data(), rom, opc, 0x6000);
+		else { memcpy(rom, rs.r[RG_MAIN].data(), 0x6000); memcpy(opc, rom, 0x6000); }
 		memcpy(map_store, rs.r[RG_MAP].data(), 0x8000); map_dat = map_store;
 		memcpy(prom_pal, rs.r[RG_PROM].data(), 256);
 		memcpy(prom_col, rs.r[RG_PROM].data() + 256, 256);
@@ -443,6 +491,7 @@ struct Machine {
 		}
 		if (pos < FRAME_SMP) synth.render(&audio[pos], FRAME_SMP - pos);
 		if (volume != 1.0f) for (auto &s : audio) { int v = (int)(s * volume); s = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v); }
+		apply_cheats();
 		frames++;
 	}
 };

@@ -1,15 +1,15 @@
-# Super Zaxxon, without audio samples
+# Zaxxon and Super Zaxxon, without audio samples
 
-A small standalone emulator of Sega's **Super Zaxxon** (1982), built from MAME's `zaxxon` driver, with one
+A small standalone emulator of Sega's **Super Zaxxon** and **Zaxxon** (1982), built from MAME's `zaxxon` driver, with one
 difference: **there are no recorded sound samples**. The original sound board is entirely discrete analog
 (noise source, op-amp filters, one-shots, 555 timers, voltage-controlled attenuators). Each sound is calculated
-from a model of its circuit, using the component values from the *IC Board A - Super ZAXXON* schematics.
+from a model of its circuit, using the component values from the *IC Board A* schematics (Super Zaxxon drawing 800-3300 and Zaxxon drawing 834-0214; the sound board is the same in both, so one synth serves both games).
 
 It is C++17 + SDL3, a handful of files, no other dependencies. **No ROMs are included.**
 
 ## ROMs
 
-Use your own MAME `szaxxon.zip` (the files are matched by CRC32, so file names do not matter).
+Use your own MAME `szaxxon.zip` (Super Zaxxon) or `zaxxon.zip` (Zaxxon, set 1). The files are matched by CRC32, so file names do not matter, and the game is detected automatically.
 
 * put the zip (or the unzipped files) in a folder called `roms` next to the program, **or**
 * give the zip / folder on the command line, **or**
@@ -38,12 +38,22 @@ Pushing a tag like `v0.1` builds a Windows zip through GitHub Actions.
 | F11 · F12 | fullscreen · screenshot |
 | + / - | volume |
 | O · F | browse for the ROM zip / folder |
-| Esc | quit |
+| Esc / Tab | menu (cheats, DIP switches, scaling, volume, ...) |
 
 A game controller works too (D-pad/stick, A/B/X fire, Start = 1P, Right bumper = 2P, Back = coin).
 
-Options: `--scale N`, `--no-rotate`, `--volume X`, `--lives 3|4|5`, `--free-play`, `--bonus 10000|20000|30000|40000`.
-`zaxxon --help` lists them all, including the headless ones (`--headless --frames N --wav out.wav --shot out.bmp --coin-at N --start-at N`).
+## Menu and cheats
+
+Esc or Tab opens a menu (on a controller: Y or Guide; D-pad moves, A selects, B closes): **infinite lives**, **infinite fuel**,
+**invincible** (the three cheats from the MAME cheat files, applied every frame), lives, bonus ship, free play, Super Zaxxon difficulty,
+scaling (fill the window or integer multiples only), rotate, volume, fullscreen, reset, load ROM zip, quit. Settings are saved.
+Lives and bonus take effect on the next game.
+
+The picture is always scaled with nearest-neighbour filtering, never smoothed.
+
+Options: `--scale N`, `--no-rotate`, `--volume X`, `--lives 3|4|5`, `--free-play`, `--hard`, `--bonus 10000|20000|30000|40000`,
+`--cheat lives,fuel,invincible` (or `all`), `--integer`.
+`zaxxon --help` lists them all, including the headless ones (`--headless --frames N --wav out.wav --shot out.bmp --coin-at N --start-at N --autoplay`).
 
 ## Comparing the sounds with the real thing
 
