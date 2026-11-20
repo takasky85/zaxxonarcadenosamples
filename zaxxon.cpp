@@ -45,6 +45,7 @@ static void usage()
 "  --reset-settings ignore and overwrite the saved settings\n"
 "  --sound-test     the sound board on its own (no ROMs needed): press keys to trigger every sound\n"
 "  --sound-demo F   write every sound, one after the other, to the WAV file F and exit (no ROMs needed)\n"
+"  --sound-wavs DIR write one WAV per sound into DIR, named like MAME's sample files (00.wav ... 23.wav), and exit\n"
 "  --headless       no window or audio device; run --frames N and exit\n"
 "  --frames N       frames to run in headless mode (default 600)\n"
 "  --wav FILE       headless: write the audio to a WAV file\n"
@@ -132,6 +133,54 @@ static void sound_demo(const char *path)
 	}
 	write_wav(path, all);
 	fprintf(stderr, "wrote %s (%.1f s)\n", path, all.size() / (double)RATE);
+}
+
+
+/* one WAV per sound, named like the MAME sample files so they can be compared side by side */
+static void sound_wavs(const std::string &dir)
+{
+	struct Item { const char *file; const char *what; int port; uint8_t on; uint8_t off; double on_s, total_s; };
+	/* on/off = the value written to the port to start / stop; one-shots only need the start (their own one-shot ends them) */
+	static const Item items[] = {
+		{ "00", "Battleship (end-of-level boss), looped",      0, 0x7f, 0xff, 6.0, 7.0 },
+		{ "01", "Laser (force field), looped",                 0, 0xbf, 0xff, 5.0, 6.0 },
+		{ "02", "Base missile, one-shot",                      0, 0xdf, 0xff, 0.1, 6.0 },
+		{ "03", "Homing missile, looped",                      0, 0xef, 0xff, 6.0, 7.0 },
+		{ "04", "Player ship, D low only (A/B bits = 3)",      0, 0xf7, 0xff, 5.0, 6.5 },
+		{ "05", "Player ship, C and D low (A/B bits = 3)",     0, 0xf3, 0xff, 5.0, 6.5 },
+		{ "08", "Cannon (your ship's fire), one-shot",         1, 0x7f, 0xff, 0.1, 3.0 },
+		{ "10", "M-Exp (ship explosion), one-shot",            1, 0xdf, 0xff, 0.1, 5.0 },
+		{ "11", "S-Exp (enemy explosion), one-shot",           1, 0xef, 0xff, 0.1, 4.0 },
+		{ "20", "Alarm 3 (low fuel), one-shot",                2, 0xf7, 0xff, 0.1, 2.0 },
+		{ "21", "Alarm 2 (target lock), one-shot",             2, 0xfb, 0xff, 0.1, 2.0 },
+		{ "23", "Shot (enemy fire), one-shot",                 2, 0xfe, 0xff, 0.1, 3.0 },
+		/* extras: the ship engine at the other A/B settings (bits 0,1), D low only and C+D low */
+		{ "04_ab0", "Player ship, D low only, A/B bits = 0",   0, 0xf4, 0xff, 5.0, 6.5 },
+		{ "04_ab1", "Player ship, D low only, A/B bits = 1",   0, 0xf5, 0xff, 5.0, 6.5 },
+		{ "04_ab2", "Player ship, D low only, A/B bits = 2",   0, 0xf6, 0xff, 5.0, 6.5 },
+		{ "05_ab0", "Player ship, C and D low, A/B bits = 0",  0, 0xf0, 0xff, 5.0, 6.5 },
+		{ "05_ab1", "Player ship, C and D low, A/B bits = 1",  0, 0xf1, 0xff, 5.0, 6.5 },
+		{ "05_ab2", "Player ship, C and D low, A/B bits = 2",  0, 0xf2, 0xff, 5.0, 6.5 },
+	};
+	std::string index = "File           Sound (MAME sample names)\n";
+	for (const Item &it : items) {
+		ZaxSynth syn;
+		const int lead = RATE / 10, non = (int)(it.on_s * RATE), n = (int)(it.total_s * RATE);
+		std::vector<int16_t> b(lead + n);
+		syn.render(b.data(), lead);
+		syn.ppi_write(it.port, it.on);
+		syn.render(b.data() + lead, non);
+		syn.ppi_write(it.port, it.off);
+		syn.render(b.data() + lead + non, n - non);
+		const std::string path = dir + "/" + it.file + ".wav";
+		write_wav(path.c_str(), b);
+		index += std::string(it.file) + ".wav";
+		index.append(15 - strlen(it.file) - 4, ' ');
+		index += std::string(it.what) + "\n";
+	}
+	FILE *f = fopen((dir + "/sounds.txt").c_str(), "w");
+	if (f) { fputs(index.c_str(), f); fclose(f); }
+	fprintf(stderr, "wrote %d WAV files (48 kHz, 16-bit, mono) into %s\n", (int)(sizeof items / sizeof items[0]), dir.c_str());
 }
 
 /* ------------------------------------------------------------------ file dialogs */
@@ -226,7 +275,7 @@ int main(int argc, char **argv)
 	bool headless = false, sound_test = false, reset_settings = false;
 	int frames_to_run = 600, shot_every = 0, coin_at = -1, start_at = -1;
 	bool autoplay = false;
-	std::string wav_path, shot_path, demo_path;
+	std::string wav_path, shot_path, demo_path, wavs_dir;
 	std::vector<std::string> paths;
 	int scale = 3;
 
@@ -258,6 +307,7 @@ int main(int argc, char **argv)
 		}
 		else if (a == "--sound-test") sound_test = true;
 		else if (a == "--sound-demo") demo_path = next("--sound-demo");
+		else if (a == "--sound-wavs") wavs_dir = next("--sound-wavs");
 		else if (a == "--headless") headless = true;
 		else if (a == "--frames") frames_to_run = atoi(next("--frames"));
 		else if (a == "--wav") wav_path = next("--wav");
@@ -270,6 +320,7 @@ int main(int argc, char **argv)
 		else paths.push_back(a);
 	}
 	if (!demo_path.empty()) { sound_demo(demo_path.c_str()); return 0; }
+	if (!wavs_dir.empty()) { sound_wavs(wavs_dir); return 0; }
 
 	if (!headless && !reset_settings) settings_load();
 	if (cli.lives >= 0) O.lives = cli.lives;

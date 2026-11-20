@@ -61,6 +61,8 @@ Two tools need no ROMs:
 
 * `zaxxon --sound-test` – a window where keys trigger every sound (Q cannon, W M-Exp, E S-Exp, R shot,
   T base missile, Y/U alarms, 1 battleship, 2 laser, 3 homing missile, 4 player ship on/off, 5 ship A/B bits).
+* `zaxxon --sound-wavs folder` – one WAV per sound, named like the MAME sample files (`00.wav` battleship, `01` laser, `02` base missile,
+  `03` homing missile, `04`/`05` player ship, `08` cannon, `10` M-Exp, `11` S-Exp, `20` alarm 3, `21` alarm 2, `23` shot), plus `sounds.txt`.
 * `zaxxon --sound-demo demo.wav` – every sound one after another in one WAV file, for A/B listening against the MAME samples.
 
 ## What is emulated
