@@ -87,7 +87,7 @@ over time; no audio was exchanged) showed that circuit-derived envelopes and som
 fitted to the sample statistics rather than derived from the drawing, and are marked `[CALIBRATED]` in the source: the loudness envelopes of
 S-EXP, M-EXP, base missile, cannon and shot (dB tables, `DbEnv`); the S-EXP / M-EXP low-pass corners; the base-missile band (≈325 Hz);
 the cannon's resonant sweep (≈3.5 kHz down to ≈1.9 kHz); the shot sweep; the alarm frequencies (2272 Hz and 1141 Hz); the battleship (a steady
-132 Hz square wave); the laser and homing-missile pitch; and the per-sound levels (`trim[]`). Circuit-derived: the noise source, the
+132 Hz square wave); the laser and homing-missile pitch; a saturation stage on the two explosions (the samples have far less peak-to-RMS range than plain filtered noise); and the per-sound levels (`trim[]`). Circuit-derived: the noise source, the
 filter shapes, the laser/homing oscillator structure, the engine photocell filter.
 
 | Sound (8255 bit) | Model | Basis |
@@ -103,7 +103,7 @@ filter shapes, the laser/homing oscillator structure, the engine photocell filte
 | Player ship (A–D) | noise → resonant band-pass whose resonance is set by a photocell (PC1) lit by an LED driven from the A/B bits; the C/D bits open two MB4391 envelopes (modelled as an MC3340) | circuit; the A/B setting to pitch mapping is uncertain: the engine gives ≈646, 537, 408 and 229 Hz for A/B = 0..3, the samples are ≈626 and ≈331 Hz |
 | Not modelled | the 834-5106 daughterboard (schematic pages 14-15): the game never drives port B bits 0-3 | – |
 
-Overall level: `ZaxSynth::trim[]` holds one level per sound, set so that each sound's RMS is 12 dB below the matching sample's RMS (leaving
+Overall level: `ZaxSynth::trim[]` holds one level per sound, set so that each sound's RMS is 6 dB below the matching sample's RMS (leaving
 headroom for mixing), and `MASTER` sets the overall level with a soft limiter. The sample files are not part of this repository.
 Tell me which sounds differ from the MAME samples and I will go back to the corresponding circuit.
 

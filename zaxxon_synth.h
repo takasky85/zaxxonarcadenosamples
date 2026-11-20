@@ -114,6 +114,11 @@ struct ZaxSynth {
 			return std::pow(10.0, (p[i - 1].db + f * (p[i].db - p[i - 1].db)) / 20.0);
 		}
 	};
+	/* Op-amp / MB4391 saturation: the real board's noise stages run into the op-amp rails and the mixer, which fattens the sound
+	   (the MAME explosion samples have only 4 dB between RMS and peak; plain filtered noise has 12-15 dB).  x is scaled by its
+	   typical RMS `sigma`, driven into tanh, and scaled back. */
+	static double sat(double x, double sigma, double drive) { return sigma * std::tanh(drive * x / sigma); }
+
 	/* band-pass state-variable filter (topology-preserving), unity gain at the centre frequency */
 	struct SVF {
 		double ic1 = 0, ic2 = 0, a1 = 0, a2 = 0, a3 = 0, k = 1;
@@ -170,6 +175,8 @@ struct ZaxSynth {
 
 	/* output */
 	HP1 hp_out;
+	static constexpr double DRIVE_EXP = 4.0;
+
 	/* Loudness envelopes: (seconds after the trigger, dB) taken from the 50 ms RMS curves of the MAME sample files */
 	static constexpr DbPt ENV_SEXP[]   = { {0,-1},{0.1,0},{0.25,-1},{0.5,-5},{0.75,-8.5},{1.0,-13},{1.25,-21},{1.5,-31},{1.72,-60} };
 	static constexpr DbPt ENV_MEXP[]   = { {0,-1},{0.1,-1},{0.25,0},{0.5,0},{1.0,0},{1.5,-1},{2.0,-2},{2.5,-10},{3.0,-23},{3.4,-40},{3.73,-70} };
@@ -181,7 +188,7 @@ struct ZaxSynth {
 	   only as good as my reading of the drawing; these are an ear-calibrated nudge (1.0 = as derived) so
 	   that no sound is buried.  Order: s-exp, m-exp, cannon, shot, base missile, alarms, battleship,
 	   laser, homing missile, player ship. */
-	double trim[10] = { 24.61, 10.92, 12.68, 2.208, 146.6, 3.821, 1.107, 4.478, 1.73, 9.464 };
+	double trim[10] = { 57.69, 25.6, 25.3, 4.457, 302.8, 7.624, 2.209, 9.038, 3.452, 19.1 };
 
 	/* ------------------------------------------------------------- init */
 	ZaxSynth() { reset(); }
@@ -201,8 +208,8 @@ struct ZaxSynth {
 		/* Sallen-Key low pass filters (R, C from the schematic): S-EXP U3b 15k/15k .033 uF (321 Hz, K 2.5, Q 2), M-EXP U3d .047 uF
 		   (226 Hz).  The MAME samples peak at 273 Hz and 184 Hz, i.e. about 0.85 / 0.82 of those corners (component tolerance /
 		   the real op-amp's finite gain), so the corners are scaled by that. */
-		lp_sexp.set_sk_lp(0.96 / (2 * M_PI * 15e3 * 0.033e-6), 2.0, 2.5, FS);
-		lp_mexp.set_sk_lp(0.89 / (2 * M_PI * 15e3 * 0.047e-6), 2.0, 2.5, FS);
+		lp_sexp.set_sk_lp(0.82 / (2 * M_PI * 15e3 * 0.033e-6), 2.0, 2.5, FS);
+		lp_mexp.set_sk_lp(0.80 / (2 * M_PI * 15e3 * 0.047e-6), 2.0, 2.5, FS);
 		lp_sexp.clear(); lp_mexp.clear();
 		hp_sexp.set(2.2e-6 * 20e3); hp_mexp.set(2.2e-6 * 20e3);
 		/* base missile: narrow band around 335 Hz (the sample is 74 % in 200-400 Hz, 22 % in 400-800 Hz) */
@@ -296,12 +303,12 @@ struct ZaxSynth {
 
 		/* ---------------- S-EXP ---------------- */
 		if (e_sexp.active()) {
-			double s = hp_sexp.run(lp_sexp.run(n2));
+			double s = sat(hp_sexp.run(lp_sexp.run(n2)), 0.130, DRIVE_EXP);
 			out += s * e_sexp.gain() * 0.154 * trim[0];
 		} else { lp_sexp.clear(); }
 		/* ---------------- M-EXP ---------------- */
 		if (e_mexp.active()) {
-			double s = hp_mexp.run(lp_mexp.run(-0.30303 * n1 * 0.5));    /* U3c gain -100k/330k, then R123/R124 halve it */
+			double s = sat(hp_mexp.run(lp_mexp.run(-0.30303 * n1 * 0.5)), 0.159, DRIVE_EXP);    /* U3c gain -100k/330k, then R123/R124 halve it */
 			out += s * e_mexp.gain() * 0.365 * trim[1];
 		} else { lp_mexp.clear(); }
 		/* ---------------- BASE MISSILE ---------------- */
