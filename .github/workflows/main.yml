@@ -1,0 +1,67 @@
+name: Build and Release with DLLs
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2 UCRT64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-sdl3
+            mingw-w64-ucrt-x86_64-pkgconf
+
+      - name: Compile project using build.sh
+        shell: msys2 {0}
+        run: |
+          ./build.sh
+          # Explicitly copy required runtime DLLs next to the executable
+          cp /ucrt64/bin/libwinpthread-1.dll .
+          cp /ucrt64/bin/libiconv-2.dll .
+
+      - name: Verify compiled binary exists
+        shell: bash
+        run: |
+          if [ ! -f "zaxxon.exe" ]; then
+            echo "Error: zaxxon.exe was not found after compilation!"
+            exit 1
+          fi
+
+      - name: Generate Tag for Manual Runs
+        id: tag
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="v0.0.0-manual-$(date +'%Y%m%d-%H%M%S')"
+          fi
+          echo "tag_name=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create Zip Archive
+        shell: pwsh
+        run: |
+          Compress-Archive -Path zaxxon.exe, SDL3.dll, libwinpthread-1.dll, libiconv-2.dll -DestinationPath zaxxon-windows.zip -Force
+
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag_name }}
+          files: |
+            zaxxon-windows.zip
