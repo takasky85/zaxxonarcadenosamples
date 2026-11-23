@@ -25,6 +25,7 @@
 #undef H
 #undef L
 #include "zaxxon_machine.h"
+#include "font8.h"
 
 using namespace zx;
 
@@ -515,9 +516,34 @@ int main(int argc, char **argv)
 	std::vector<uint32_t> view;
 	Uint64 next_ns = SDL_GetTicksNS();
 
+	/* the menu font (font8.h, converted from Press Start 2P) as one white-on-clear strip, tinted per string */
+	SDL_Texture *font_tex = nullptr;
+	{
+		std::vector<uint32_t> px(95 * 8 * 8, 0);
+		for (int c = 0; c < 95; c++)
+			for (int y = 0; y < 8; y++)
+				for (int x = 0; x < 8; x++)
+					if (zfont::GLYPHS[c][y] & (0x80 >> x)) px[y * 95 * 8 + c * 8 + x] = 0xffffffffu;
+		SDL_Surface *sf = SDL_CreateSurfaceFrom(95 * 8, 8, SDL_PIXELFORMAT_RGBA8888, px.data(), 95 * 8 * 4);
+		if (sf) {
+			font_tex = SDL_CreateTextureFromSurface(ren, sf);
+			SDL_DestroySurface(sf);
+		}
+		if (font_tex) { SDL_SetTextureScaleMode(font_tex, SDL_SCALEMODE_NEAREST); SDL_SetTextureBlendMode(font_tex, SDL_BLENDMODE_BLEND); }
+	}
 	auto text = [&](float x, float y, const char *s, int r, int g, int b) {
-		SDL_SetRenderDrawColor(ren, (Uint8)r, (Uint8)g, (Uint8)b, 255);
-		SDL_RenderDebugText(ren, x, y, s);
+		if (!font_tex) {                                   /* fall back to SDL's built-in font */
+			SDL_SetRenderDrawColor(ren, (Uint8)r, (Uint8)g, (Uint8)b, 255);
+			SDL_RenderDebugText(ren, x, y, s);
+			return;
+		}
+		SDL_SetTextureColorMod(font_tex, (Uint8)r, (Uint8)g, (Uint8)b);
+		for (; *s; s++, x += 8) {
+			const unsigned char c = (unsigned char)*s;
+			if (c <= 32 || c > 126) continue;
+			const SDL_FRect src = { (float)((c - 32) * 8), 0, 8, 8 }, dst = { x, y, 8, 8 };
+			SDL_RenderTexture(ren, font_tex, &src, &dst);
+		}
 	};
 	auto set_rotate = [&](bool r) { O.rotate = r; cur_w = r ? SCR_H : SCR_W; cur_h = r ? SCR_W : SCR_H; set_logical(); };
 	auto set_fullscreen = [&](bool f) { O.fullscreen = f; SDL_SetWindowFullscreen(win, f); };
@@ -813,6 +839,7 @@ int main(int argc, char **argv)
 	for (SDL_Gamepad *g : pads) SDL_CloseGamepad(g);
 	if (as) SDL_DestroyAudioStream(as);
 	SDL_DestroyTexture(tex);
+	if (font_tex) SDL_DestroyTexture(font_tex);
 	SDL_DestroyRenderer(ren);
 	SDL_DestroyWindow(win);
 	SDL_Quit();

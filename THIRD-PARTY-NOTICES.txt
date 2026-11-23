@@ -59,7 +59,14 @@ and to alter it and redistribute it freely, subject to the following restriction
 3. This notice may not be removed or altered from any source distribution.
 
 
-4. Other
+4. Press Start 2P  (the menu font; font8.h is an 8x8 bitmap conversion of it)
+-----------------------------------------------------------------------------
+Font by CodeMan38 (http://www.zone38.net/).
+Copyright 2012 The Press Start 2P Project Authors (cody@zone38.net), with Reserved Font Name "Press Start 2P".
+This Font Software is licensed under the SIL Open Font License, Version 1.1.  The full licence is in OFL.txt.
+The bitmap in font8.h is a Modified Version (a format conversion) and is under the same licence.
+
+5. Other
 --------
 * The sound circuits were modelled from the "IC Board A - Super ZAXXON" schematics supplied by the user.
 * The Zaxxon / Super Zaxxon name and game are the property of their owners (Sega).  No ROMs are included.

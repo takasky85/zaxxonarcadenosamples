@@ -59,6 +59,8 @@ Lives and bonus take effect on the next game.
 
 The picture is always scaled with nearest-neighbour filtering, never smoothed.
 
+The menus use the Press Start 2P font by CodeMan38 (SIL Open Font License, see `OFL.txt`), built in as an 8x8 bitmap.
+
 Options: `--scale N`, `--no-rotate`, `--volume X`, `--lives 3|4|5`, `--free-play`, `--hard`, `--bonus 10000|20000|30000|40000`,
 `--cheat lives,fuel,invincible` (or `all`), `--integer`, `--mc3340`, `--engine board|mame`.
 `zaxxon --help` lists them all, including the headless ones (`--headless --frames N --wav out.wav --shot out.bmp --coin-at N --start-at N --autoplay`).
