@@ -8,7 +8,9 @@
 #include <SDL3/SDL.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cctype>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -33,8 +35,10 @@ static void usage()
 	fputs(
 "Zaxxon / Super Zaxxon emulator with synthesized (sample-free) sound\n"
 "usage: zaxxon [options] [szaxxon.zip | zaxxon.zip | rom-folder] ...\n"
-"  With no path, a folder called 'roms' next to the program (or the current folder) is searched.\n"
-"  You can also drop a zip or a folder on the window, or press O (zip) / F (folder) to browse.\n\n"
+"  With no path, a folder called 'roms' next to the program, the current folder and the folder the ROMs were last\n"
+"  loaded from are searched.  When both games are there, a screen asks which one to play.\n"
+"  You can also drop a zip or a folder on the window, or press O (zip) / F (folder) to browse; that folder is remembered.\n\n"
+"  --game NAME      zaxxon or szaxxon: start that game without asking\n"
 "  --scale N        window scale (default 3)\n"
 "  --no-rotate      do not rotate the picture 90 degrees\n"
 "  --volume X       master volume, 0..2 (default 1)\n"
@@ -215,6 +219,8 @@ struct Opts {
 	bool integer = false, rotate = true, fullscreen = false;
 	int volume = 100;                              /* percent */
 	int vca = 0;                                   /* 0 = MB4391 (curve fitted to a real board), 1 = MC3340 */
+	int game = SET_SZAXXON;                        /* the game played last */
+	std::string rom_dir;                           /* the folder the ROMs were last loaded from */
 };
 static Opts O;
 
@@ -245,10 +251,16 @@ static void settings_load()
 {
 	const std::string path = settings_path(); if (path.empty()) return;
 	FILE *f = fopen(path.c_str(), "r"); if (!f) return;
-	char k[64]; int v;
-	while (fscanf(f, "%63[^=]=%d\n", k, &v) == 2) {
-		std::string key = k;
-		if (key == "lives") O.lives = v; else if (key == "bonus") O.bonus = v; else if (key == "free_play") O.free_play = v;
+	char line[1200];
+	while (fgets(line, sizeof line, f)) {
+		std::string ln = line;
+		while (!ln.empty() && (ln.back() == '\n' || ln.back() == '\r')) ln.pop_back();
+		const size_t eq = ln.find('='); if (eq == std::string::npos) continue;
+		const std::string key = ln.substr(0, eq), val = ln.substr(eq + 1);
+		const int v = atoi(val.c_str());
+		if (key == "rom_dir") O.rom_dir = val;
+		else if (key == "game") O.game = v == SET_ZAXXON ? SET_ZAXXON : SET_SZAXXON;
+		else if (key == "lives") O.lives = v; else if (key == "bonus") O.bonus = v; else if (key == "free_play") O.free_play = v;
 		else if (key == "hard") O.hard = v; else if (key == "inf_lives") O.inf_lives = v; else if (key == "inf_fuel") O.inf_fuel = v;
 		else if (key == "invincible") O.invincible = v; else if (key == "integer") O.integer = v; else if (key == "rotate") O.rotate = v;
 		else if (key == "fullscreen") O.fullscreen = v; else if (key == "volume") O.volume = v;
@@ -260,33 +272,70 @@ static void settings_save()
 {
 	const std::string path = settings_path(); if (path.empty()) return;
 	FILE *f = fopen(path.c_str(), "w"); if (!f) return;
-	fprintf(f, "lives=%d\nbonus=%d\nfree_play=%d\nhard=%d\ninf_lives=%d\ninf_fuel=%d\ninvincible=%d\ninteger=%d\nrotate=%d\nfullscreen=%d\nvolume=%d\nvca=%d\n",
-		O.lives, O.bonus, O.free_play, O.hard, O.inf_lives, O.inf_fuel, O.invincible, O.integer, O.rotate, O.fullscreen, O.volume, O.vca);
+	fprintf(f, "lives=%d\nbonus=%d\nfree_play=%d\nhard=%d\ninf_lives=%d\ninf_fuel=%d\ninvincible=%d\ninteger=%d\nrotate=%d\nfullscreen=%d\nvolume=%d\nvca=%d\ngame=%d\nrom_dir=%s\n",
+		O.lives, O.bonus, O.free_play, O.hard, O.inf_lives, O.inf_fuel, O.invincible, O.integer, O.rotate, O.fullscreen, O.volume, O.vca,
+		O.game, O.rom_dir.c_str());
 	fclose(f);
 }
 
-/* ------------------------------------------------------------------ main */
-static bool boot(const std::vector<std::string> &paths, bool search_default)
+/* ------------------------------------------------------------------ ROM library */
+/* Every ROM file found in the usual places (or the paths given), and which of the two games they complete, so both
+   games can be offered without browsing for the ROMs each time. */
+static std::vector<rz::RomFile> g_lib;
+static bool g_have[2];                             /* indexed by SET_SZAXXON / SET_ZAXXON */
+
+static bool set_complete(const std::vector<rz::RomFile> &files, int set)
 {
-	std::vector<rz::RomFile> files;
+	RomSet t; std::string miss;
+	return load_roms(files, t, miss, set);
+}
+static void scan_library(const std::vector<std::string> &paths, bool search_default)
+{
+	g_lib.clear();
 	if (paths.empty() && search_default) {
-		rz::add_path("roms", files); rz::add_path(".", files);
+		rz::add_path("roms", g_lib); rz::add_path(".", g_lib);
 		const char *bp = SDL_GetBasePath();
-		if (bp) { rz::add_path(std::string(bp) + "roms", files); rz::add_path(bp, files); }
-	} else for (auto &p : paths) rz::add_path(p, files);
+		if (bp) { rz::add_path(std::string(bp) + "roms", g_lib); rz::add_path(bp, g_lib); }
+		if (!O.rom_dir.empty()) rz::add_path(O.rom_dir, g_lib);
+	} else for (auto &p : paths) rz::add_path(p, g_lib);
+	for (int s = 0; s < 2; s++) g_have[s] = set_complete(g_lib, s);
+}
+static int other_set(int s) { return s == SET_SZAXXON ? SET_ZAXXON : SET_SZAXXON; }
+static bool boot_set(int set)
+{
 	static RomSet rs;
 	std::string missing;
-	if (!load_roms(files, rs, missing)) {
-		if (!files.empty()) fprintf(stderr, "Missing ROMs:\n%s", missing.c_str());
+	if (!load_roms(g_lib, rs, missing, set)) {
+		if (!g_lib.empty()) fprintf(stderr, "Missing ROMs:\n%s", missing.c_str());
 		return false;
 	}
 	M.load(rs);
 	apply_opts();
 	M.reset();
+	O.game = M.set_id;
 	return true;
 }
+/* a zip or folder chosen by drop / dialog: remember its folder, and look there for the other game too.
+   Returns the game it holds (-1: not recognised); both = true when the folder has both games. */
+static int add_rom_path(const std::string &path, bool &both)
+{
+	namespace fs = std::filesystem;
+	std::error_code ec;
+	std::vector<rz::RomFile> one; rz::add_path(path, one);
+	int set = set_complete(one, SET_SZAXXON) ? SET_SZAXXON : set_complete(one, SET_ZAXXON) ? SET_ZAXXON : -1;
+	const std::string dir = fs::is_directory(path, ec) ? path : fs::path(path).parent_path().string();
+	both = set_complete(one, SET_SZAXXON) && set_complete(one, SET_ZAXXON);
+	if (set < 0) return -1;
+	if (!dir.empty()) O.rom_dir = dir;
+	scan_library({}, true);
+	for (auto &f : one) g_lib.push_back(f);       /* in case the folder could not be read back */
+	g_have[set] = true;
+	return set;
+}
 
-enum { MI_RESUME, MI_LIVES_CHEAT, MI_FUEL_CHEAT, MI_INVINCIBLE, MI_LIVES, MI_BONUS, MI_FREEPLAY, MI_DIFF, MI_SCALE, MI_ROTATE,
+/* ------------------------------------------------------------------ main */
+
+enum { MI_RESUME, MI_GAME, MI_LIVES_CHEAT, MI_FUEL_CHEAT, MI_INVINCIBLE, MI_LIVES, MI_BONUS, MI_FREEPLAY, MI_DIFF, MI_SCALE, MI_ROTATE,
        MI_VOLUME, MI_VCA, MI_FULLSCREEN, MI_RESET, MI_LOAD, MI_QUIT, MI_COUNT };
 
 int main(int argc, char **argv)
@@ -299,7 +348,7 @@ int main(int argc, char **argv)
 	int scale = 3;
 
 	/* command-line values override the saved settings, so remember which were given */
-	struct Cli { int lives = -1, bonus = -1, volume = -1, free_play = -1, hard = -1, integer = -1, rotate = -1, vca = -1;
+	struct Cli { int lives = -1, bonus = -1, volume = -1, free_play = -1, hard = -1, integer = -1, rotate = -1, vca = -1, game = -1;
 	             bool inf_lives = false, inf_fuel = false, invincible = false; } cli;
 	for (int i = 1; i < argc; i++) {
 		std::string a = argv[i];
@@ -325,6 +374,13 @@ int main(int argc, char **argv)
 			if (v.find("invinc") != std::string::npos) cli.invincible = true;
 		}
 		else if (a == "--mc3340") cli.vca = 1;
+		else if (a == "--game") {
+			std::string v = next("--game");
+			for (auto &ch : v) ch = (char)tolower((unsigned char)ch);
+			if (v == "zaxxon") cli.game = SET_ZAXXON;
+			else if (v == "szaxxon" || v == "super" || v == "superzaxxon" || v == "super-zaxxon") cli.game = SET_SZAXXON;
+			else { fprintf(stderr, "--game: zaxxon or szaxxon\n"); return 1; }
+		}
 		else if (a == "--sound-test") sound_test = true;
 		else if (a == "--sound-demo") demo_path = next("--sound-demo");
 		else if (a == "--sound-wavs") wavs_dir = next("--sound-wavs");
@@ -357,7 +413,9 @@ int main(int argc, char **argv)
 
 	/* ---------------- headless ---------------- */
 	if (headless) {
-		if (!boot(paths, true)) {
+		scan_library(paths, true);
+		const int want = cli.game >= 0 ? cli.game : g_have[SET_SZAXXON] ? SET_SZAXXON : SET_ZAXXON;
+		if (!boot_set(want)) {
 			fprintf(stderr, "Could not find all the ROMs (szaxxon.zip or zaxxon.zip). Pass the zip or folder on the command line.\n");
 			return 1;
 		}
@@ -391,12 +449,23 @@ int main(int argc, char **argv)
 	if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) { fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1; }
 	SDL_InitSubSystem(SDL_INIT_GAMEPAD);
 	SDL_SetHint(SDL_HINT_FORCE_RAISEWINDOW, "1");
-	bool have_game = false;
-	if (!sound_test) have_game = boot(paths, true);
+	bool have_game = false, picking = false;
+	int psel = O.game;                             /* the game picker's highlighted game */
+	if (!sound_test) {
+		scan_library(paths, true);
+		if (cli.game >= 0) have_game = boot_set(cli.game);
+		else if (g_have[0] && g_have[1]) picking = true;              /* both games: let the player choose */
+		else if (g_have[SET_SZAXXON]) have_game = boot_set(SET_SZAXXON);
+		else if (g_have[SET_ZAXXON]) have_game = boot_set(SET_ZAXXON);
+		if ((have_game || picking) && !paths.empty()) {          /* remember where the ROMs given on the command line are */
+			namespace fs = std::filesystem; std::error_code ec;
+			O.rom_dir = fs::is_directory(paths[0], ec) ? paths[0] : fs::path(paths[0]).parent_path().string();
+		}
+	}
 	apply_opts();
 
 	int cur_w = O.rotate ? SCR_H : SCR_W, cur_h = O.rotate ? SCR_W : SCR_H;
-	auto base_title = [&]() { return sound_test ? std::string("Zaxxon - sound test") : have_game ? std::string(SET_NAMES[M.set_id]) : std::string("Zaxxon"); };
+	auto base_title = [&]() { return sound_test ? std::string("Zaxxon - sound test") : have_game ? std::string(SET_NAMES[M.set_id]) : std::string("Zaxxon / Super Zaxxon"); };
 	SDL_Window *win = SDL_CreateWindow(base_title().c_str(), cur_w * scale, cur_h * scale, SDL_WINDOW_RESIZABLE | (O.fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
 	SDL_Renderer *ren = win ? SDL_CreateRenderer(win, nullptr) : nullptr;
 	if (!win || !ren) { fprintf(stderr, "window/renderer: %s\n", SDL_GetError()); return 1; }
@@ -434,12 +503,24 @@ int main(int argc, char **argv)
 	auto set_rotate = [&](bool r) { O.rotate = r; cur_w = r ? SCR_H : SCR_W; cur_h = r ? SCR_W : SCR_H; set_logical(); };
 	auto set_fullscreen = [&](bool f) { O.fullscreen = f; SDL_SetWindowFullscreen(win, f); };
 	auto open_pick_zip = [&]() { static const SDL_DialogFileFilter f[] = { { "ROM zip", "zip" } }; SDL_ShowOpenFileDialog(dialog_cb, nullptr, win, f, 1, nullptr, false); };
+	auto start_game = [&](int set) {
+		if (boot_set(set)) {
+			have_game = true; picking = false; menu = false;
+			SDL_SetWindowTitle(win, base_title().c_str());
+			if (as) SDL_ClearAudioStream(as);
+			settings_save();
+		}
+	};
 
 	/* ---- menu ---- */
 	auto item_text = [&](int i, char *b, size_t n) {
 		auto onoff = [](bool v) { return v ? "ON" : "OFF"; };
 		switch (i) {
 		case MI_RESUME:        snprintf(b, n, "Resume"); break;
+		case MI_GAME:
+			if (g_have[0] && g_have[1]) snprintf(b, n, "Play %s", SET_NAMES[have_game ? other_set(M.set_id) : O.game]);
+			else snprintf(b, n, "Load the other game...");
+			break;
 		case MI_LIVES_CHEAT:   snprintf(b, n, "Infinite lives  %s", onoff(O.inf_lives)); break;
 		case MI_FUEL_CHEAT:    snprintf(b, n, "Infinite fuel   %s", onoff(O.inf_fuel)); break;
 		case MI_INVINCIBLE:    snprintf(b, n, "Invincible      %s", onoff(O.invincible)); break;
@@ -460,6 +541,10 @@ int main(int argc, char **argv)
 	auto change = [&](int i, int dir) {      /* dir: -1 left, +1 right / enter */
 		switch (i) {
 		case MI_RESUME: menu = false; break;
+		case MI_GAME:
+			if (g_have[0] && g_have[1]) start_game(have_game ? other_set(M.set_id) : O.game);
+			else open_pick_zip();
+			break;
 		case MI_LIVES_CHEAT: O.inf_lives = !O.inf_lives; break;
 		case MI_FUEL_CHEAT:  O.inf_fuel = !O.inf_fuel; break;
 		case MI_INVINCIBLE:  O.invincible = !O.invincible; break;
@@ -507,6 +592,26 @@ int main(int argc, char **argv)
 					else if (b == SDL_GAMEPAD_BUTTON_SOUTH) menu_nav(0, 0, true);
 					else if (b == SDL_GAMEPAD_BUTTON_EAST || b == SDL_GAMEPAD_BUTTON_START || b == SDL_GAMEPAD_BUTTON_NORTH || b == SDL_GAMEPAD_BUTTON_GUIDE) menu = false;
 				} else if (b == SDL_GAMEPAD_BUTTON_NORTH || b == SDL_GAMEPAD_BUTTON_GUIDE) { menu = true; msel = 0; }
+				else if (picking) {
+					if (b == SDL_GAMEPAD_BUTTON_DPAD_UP || b == SDL_GAMEPAD_BUTTON_DPAD_DOWN) psel = other_set(psel);
+					else if (b == SDL_GAMEPAD_BUTTON_SOUTH || b == SDL_GAMEPAD_BUTTON_START) start_game(psel);
+				}
+			}
+			else if (ev.type == SDL_EVENT_KEY_DOWN && picking && !menu && !sound_test &&
+			         ev.key.key != SDLK_ESCAPE && ev.key.key != SDLK_TAB) {
+				const SDL_Keycode k = ev.key.key;
+				if (k == SDLK_UP || k == SDLK_DOWN) psel = other_set(psel);
+				else if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE || k == SDLK_Z || k == SDLK_1) start_game(psel);
+				else if (k == SDLK_O) open_pick_zip();
+				else if (k == SDLK_F) SDL_ShowOpenFolderDialog(dialog_cb, nullptr, win, nullptr, false);
+				else if (k == SDLK_F11) { set_fullscreen(!(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN)); settings_save(); }
+			}
+			else if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && picking && !menu && !sound_test) {
+				SDL_ConvertEventToRenderCoordinates(ren, &ev);
+				for (int i = 0; i < 2; i++) {
+					const float y0 = 60.0f + 20.0f * i;
+					if (ev.button.y >= y0 - 5 && ev.button.y < y0 + 13) { psel = i == 0 ? SET_ZAXXON : SET_SZAXXON; start_game(psel); }
+				}
 			}
 			else if (ev.type == SDL_EVENT_KEY_DOWN && menu && !sound_test) {
 				const SDL_Keycode k = ev.key.key;
@@ -549,8 +654,11 @@ int main(int argc, char **argv)
 		/* a path chosen by drop / dialog */
 		std::string pend; { std::lock_guard<std::mutex> l(g_pm); pend.swap(g_pending); }
 		if (!pend.empty()) {
-			if (boot({ pend }, false)) { have_game = true; SDL_SetWindowTitle(win, base_title().c_str()); if (as) SDL_ClearAudioStream(as); }
-			else SDL_SetWindowTitle(win, "Zaxxon - those ROMs were not recognised");
+			bool both = false;
+			const int set = add_rom_path(pend, both);
+			if (set < 0) SDL_SetWindowTitle(win, "Zaxxon - those ROMs were not recognised");
+			else if (both) { picking = true; have_game = false; menu = false; psel = O.game; settings_save(); SDL_SetWindowTitle(win, base_title().c_str()); }
+			else start_game(set);
 		}
 
 		/* pacing: keep about two frames of audio queued */
@@ -622,6 +730,22 @@ int main(int argc, char **argv)
 				SDL_UpdateTexture(tex, &r, view.data(), w * 4);
 				SDL_FRect src = { 0, 0, (float)w, (float)h };
 				SDL_RenderTexture(ren, tex, &src, nullptr);
+			} else if (picking) {
+				text(8, 24, "Choose a game", 255, 255, 0);
+				text(8, 34, "-------------", 120, 120, 120);
+				for (int i = 0; i < 2; i++) {
+					const int set = i == 0 ? SET_ZAXXON : SET_SZAXXON;
+					const bool on = psel == set;
+					const float y = 60.0f + 20.0f * i;
+					if (on) text(8, y, ">", 255, 255, 0);
+					text(20, y, SET_NAMES[set], on ? 255 : 200, on ? 255 : 200, on ? 0 : 200);
+				}
+				text(8, 120, "Up/Down: choose", 160, 160, 160);
+				text(8, 130, "Enter / fire: play", 160, 160, 160);
+				text(8, 140, "Esc / Tab: menu", 160, 160, 160);
+				text(8, 160, "Switch games later from", 130, 130, 130);
+				text(8, 170, "the menu (Esc).", 130, 130, 130);
+				if (as) { int16_t z[FRAME_SMP] = {}; SDL_PutAudioStreamData(as, z, sizeof z); }
 			} else {
 				text(8, 24, "No ROMs found.", 255, 255, 0);
 				text(8, 44, "Drop szaxxon.zip or", 220, 220, 220);
@@ -629,7 +753,10 @@ int main(int argc, char **argv)
 				text(8, 64, "folder) on this window,", 220, 220, 220);
 				text(8, 74, "press O to pick the zip,", 220, 220, 220);
 				text(8, 84, "or F to pick a folder.", 220, 220, 220);
-				text(8, 104, "Esc / Tab: menu", 160, 160, 160);
+				text(8, 104, "The folder is remembered:", 160, 160, 160);
+				text(8, 114, "put both zips in it to", 160, 160, 160);
+				text(8, 124, "choose between the games.", 160, 160, 160);
+				text(8, 144, "Esc / Tab: menu", 160, 160, 160);
 				if (as) { int16_t z[FRAME_SMP] = {}; SDL_PutAudioStreamData(as, z, sizeof z); }
 			}
 			if (menu) {
@@ -645,11 +772,10 @@ int main(int argc, char **argv)
 					const bool on = i == msel;
 					if (on) text(0, y, ">", 255, 255, 0);
 					text(10, y, b, on ? 255 : 210, on ? 255 : 210, on ? 0 : 210);
-					y += (i == MI_RESUME || i == MI_INVINCIBLE || i == MI_DIFF || i == MI_FULLSCREEN) ? 16 : 10;
+					y += (i == MI_GAME || i == MI_INVINCIBLE || i == MI_DIFF || i == MI_FULLSCREEN) ? 16 : 10;
 				}
 				y += 4;
-				text(8, y, "Up/Down choose", 130, 130, 130); y += 9;
-				text(8, y, "Left/Right/Enter change", 130, 130, 130); y += 9;
+				text(8, y, "Arrows/Enter: change", 130, 130, 130); y += 9;
 				text(8, y, "Esc / Tab close", 130, 130, 130); y += 9;
 				text(8, y, "Lives/bonus: next game", 130, 130, 130);
 			}

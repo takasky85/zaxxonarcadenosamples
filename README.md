@@ -10,11 +10,16 @@ It is C++17 + SDL3, a handful of files, no other dependencies. **No ROMs are inc
 
 ## ROMs
 
-Use your own MAME `szaxxon.zip` (Super Zaxxon) or `zaxxon.zip` (Zaxxon, set 1). The files are matched by CRC32, so file names do not matter, and the game is detected automatically.
+Use your own MAME `szaxxon.zip` (Super Zaxxon) and/or `zaxxon.zip` (Zaxxon, set 1). The files are matched by CRC32, so file names
+do not matter, and the game is detected automatically.
 
-* put the zip (or the unzipped files) in a folder called `roms` next to the program, **or**
+* put the zips (or the unzipped files) in a folder called `roms` next to the program, **or**
 * give the zip / folder on the command line, **or**
 * drop the zip / folder on the window, or press **O** (pick a zip) / **F** (pick a folder).
+
+The folder is remembered, so you only browse once. When both games are found, a screen asks which one to play (Up/Down,
+Enter), and **Play Zaxxon / Play Super Zaxxon** at the top of the menu switches between them. `--game zaxxon` or
+`--game szaxxon` starts one directly.
 
 ## Build
 
@@ -91,7 +96,8 @@ parts, all running at 192 kHz and filtered down to 48 kHz:
   below about one diode drop once it has to sink more than its 50 µA internal current. That detail matters: it is what keeps the
   shot sound going for its full length, and it sets the battleship's pitch.
 * **Op-amp oscillators** (integrator, Schmitt trigger, switching transistor) and **555 / 556 timers**: solved event by event, so
-  every threshold crossing and ramp is exact.
+  every threshold crossing and ramp is exact. The Schmitt trigger's LM324 sits saturated at a rail and needs about 40 µs to come
+  out of saturation before it switches; that delay is what keeps the shot's chirps and the top of the laser sweep from going too high.
 * **74123 one-shots**, **diode/RC envelope networks**, **Sallen-Key, multiple-feedback and bridged-T filters** (exact transfer
   functions from the part values), **4016 analog switches** with their coupling capacitors (the clicks at sound start are real),
   the **CdS photocell** that tunes the player-ship filter, the transistor that sweeps the cannon's filter, and the
@@ -128,11 +134,11 @@ this repository and are never played):
 |---|---|---|
 | Battleship (boss) | 132 Hz square, wobbling 129–135 Hz at 2.9 Hz | 132 Hz, 129–135 Hz |
 | Alarm 2 / alarm 3 | 1130 Hz / 2270 Hz | 1132 Hz / 2265 Hz |
-| Shot (also the coin sound) | 1.2 kHz chirp, then 280–310 Hz until it fades | same |
+| Shot (also the coin sound) | a chirp every 30–40 ms peaking at 2.1–2.8 kHz, falling to about 300 Hz | same |
 | Cannon (your ship's fire) | noise through a filter sweeping 3.7 → 1.85 kHz | same sweep |
 | Small / medium explosion | low-passed noise, fade within about 2 dB | same spectrum |
 | Player ship (port A = f0) | 622 Hz | 626–633 Hz |
-| Laser (force field) | 267–510 Hz sweep, 0.19 s period | 273–504 Hz, 0.19 s |
+| Laser (force field) | 275–504 Hz sweep, 0.19 s period | 273–504 Hz, 0.19 s |
 | Homing missile | 900–1125 Hz, median 1012 Hz, 15 Hz wobble | 950–1125 Hz, median 1019 Hz, 14 Hz |
 
 The recording named `02.wav` (base missile) has the same spectrum as the player-ship recording; the emulator follows the drawing
@@ -141,10 +147,11 @@ The recording named `02.wav` (base missile) has the same spectrum as the player-
 ### What was calibrated, and what is assumed
 
 These were set from the recordings because the drawings and data sheets do not fix them; they are marked `[CALIBRATED]` in
-the source: the MB4391 curve (above), the LM324's output floor when sinking current (0.636 V at 1 mA, which sets the battleship
-pitch), the 556 comparator delay of the alarm clock (1.15 µs), the CdS cell's resistance at full LED current (sets the engine's
-pitch), and two timing capacitors set inside their tolerance: the homing missile's C45 at 9.1 nF (drawn 10 nF; 10 nF plays about
-10 % low) and the laser's C138 at 10.8 nF (drawn 10 nF; 10 nF plays 6–9 % high). The cannon transistor uses textbook Ebers-Moll values (reverse beta 3).
+the source: the MB4391 curve (above), the LM324's output floor when sinking current (0.648 V at 1 mA, which sets the battleship
+pitch), the LM324 Schmitt triggers' 40 µs saturation delay (fitted to the laser; the shot then matched without further fitting),
+the 556 comparator delay of the alarm clock (1.15 µs), the CdS cell's resistance at full LED current (sets the engine's pitch),
+the homing missile's C45 at 9.1 nF (drawn 10 nF, so inside its tolerance; 10 nF plays about 10 % low), and the shot's electrolytic
+C89 at 0.78 µF (drawn 0.68 µF; sets how fast the shot fades, which then matches the recording within 0.6 dB). The cannon transistor uses textbook Ebers-Moll values (reverse beta 3).
 
 Marked `[ASSUMPTION]`: the outputs of U14 and U15 both reach R177 (that trace is unreadable on the scan), Super Zaxxon's SOUND OUT B
 has a 200 Ω source impedance, the photocell's speed (8 ms to brighten, 40 ms to darken) and LED drop, and a 0.3 µs comparator delay

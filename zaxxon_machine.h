@@ -86,12 +86,14 @@ struct RomSet { std::vector<uint8_t> r[RG_COUNT]; int set = SET_SZAXXON; };
 
 /* match every ROM by CRC32 (file names do not matter) against both sets; returns false and lists what is
    missing from the set that came closest */
-static bool load_roms(const std::vector<rz::RomFile> &files, RomSet &rs, std::string &missing)
+/* want: SET_SZAXXON or SET_ZAXXON to load only that game, -1 for the first complete set (Super Zaxxon first) */
+static bool load_roms(const std::vector<rz::RomFile> &files, RomSet &rs, std::string &missing, int want = -1)
 {
 	struct Cand { const RomSpec *specs; int n; int set; };
 	const Cand cands[2] = { { SZAXXON_ROMS, N_SZAXXON_ROMS, SET_SZAXXON }, { ZAXXON_ROMS, N_ZAXXON_ROMS, SET_ZAXXON } };
 	int best_hits = -1; std::string best_missing;
 	for (const Cand &c : cands) {
+		if (want >= 0 && c.set != want) continue;
 		RomSet t; for (int g = 0; g < RG_COUNT; g++) t.r[g].assign(REGION_SIZE[g], 0);
 		t.set = c.set;
 		int hits = 0; std::string miss;

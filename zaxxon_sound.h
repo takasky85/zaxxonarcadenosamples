@@ -10,7 +10,8 @@
  *     - MM5837 noise: 17-bit shift register, taps 14 and 17, clocked at 103.2 kHz (12 V), output 3.0 / 10.5 V.
  *     - LM324 op-amps: output range 0.03..10.5 V on 12 V, slew rate 0.5 V/us.
  *     - op-amp VCOs (integrator + Schmitt trigger + switching transistor), solved event by event, so the
- *       Schmitt output's slewing, the transistor switching point and the integrator ramps are exact.
+ *       Schmitt output's slewing, the transistor switching point and the integrator ramps are exact.  The Schmitt
+ *       op-amp also needs about 40 us to come out of saturation before it switches (see SCHMITT_TD).
  *     - 555 / 556 timers: exponential charge / discharge, thresholds at CV and CV/2, discharge transistor
  *       saturation, comparator-to-output delay.  Also solved event by event.
  *     - 74123 one-shots: t = 0.28 R C (1 + 0.7 / R[kOhm]), retriggerable.
@@ -65,8 +66,16 @@ static inline double oneshot_t(double r, double c) { return 0.28 * r * c * (1.0 
 /* Lowest output of an LM324 that has to sink i amps.  Up to its 50 uA internal current sink it reaches ground; above
    that the output PNP has to conduct, which needs about one Vbe.  [CALIBRATED: VFLOOR at 1 mA, which puts the
    battleship tone, whose pitch is set by this floor, at the 132 Hz of a real board] */
-static constexpr double VFLOOR = 0.636;
-static constexpr double HM_C45 = 9.1e-9, LAS_C138 = 10.8e-9;   /* [CALIBRATED] see init_parts() */
+static constexpr double VFLOOR = 0.648;
+/* An LM324 wired as a Schmitt trigger sits saturated at a rail; when its input crosses the threshold it takes a while
+   to come out of saturation before its output starts to slew.  [CALIBRATED: 40 us.  Fitted to the laser recording,
+   whose sweep (273..504 Hz) it then matches with the drawn part values; it also brings the shot's chirps down to the
+   recording's 2.1..2.8 kHz peaks, which nothing was fitted to] */
+static constexpr double SCHMITT_TD = 40e-6;
+static constexpr double HM_C45 = 9.1e-9;          /* [CALIBRATED] see init_parts() */
+/* [CALIBRATED] the shot's C89 (drawn 0.68u, an electrolytic: those were made -20 % / +80 %) at 0.78u.  It sets how fast
+   the shot fades and how long its chirps stay high; 0.78u matches the recording's fade within 0.6 dB down to -20 dB. */
+static constexpr double SHOT_C89 = 0.78e-6;
 static inline double oa_floor(double i)
 {
 	return i <= 50e-6 ? OA_LO : std::max(OA_LO, VFLOOR + 0.026 * std::log((i - 50e-6) / 1e-3));
@@ -195,6 +204,7 @@ struct OpVCO {
 	double C = 1e-8, Rin = 1e5, kp = 0.5, Rq = 5e4, vsat = 0.0075, qth = 3.3;  /* vsat: switch saturated hard at ~10 uA: VT ln(1 + 1/bR), reverse beta 3 */
 	double a = 0, b = 0;                        /* Schmitt + input = a + b * so */
 	double vi = 5.0, so = OA_HI; int dir = 1;   /* integrator output, Schmitt output, direction the Schmitt output moves */
+	double hold = 0;                            /* Schmitt output still saturated after its input crossed (SCHMITT_TD) */
 	double avg_vi = 5.0, avg_so = OA_HI;
 	void init(double c, double rin, double kplus, double rq, double ra, double rb, double rbase, double rshunt)
 	{
@@ -202,7 +212,7 @@ struct OpVCO {
 		const double g = 1.0 / ra + 1.0 / rb;
 		a = (VREF / ra) / g; b = (1.0 / rb) / g;
 		qth = 1.0 + rbase * 0.5 / rshunt;      /* diode + Vbe (about 0.5 V each at these currents) + drop across the base resistor */
-		vi = a + b * OA_LO + 0.1; so = OA_HI; dir = 1;
+		vi = a + b * OA_LO + 0.1; so = OA_HI; dir = 1; hold = 0;
 	}
 	double vplus(double s) const { return a + b * s; }
 	void step(double vc)
@@ -218,18 +228,22 @@ struct OpVCO {
 			double s = so > qth ? s_on : s_off;
 			if ((vi >= OA_HI && s > 0) || (vi <= OA_LO && s < 0)) s = 0;
 			double sr = 0;
-			if (dir > 0 && so < OA_HI) sr = OA_SR; else if (dir < 0 && so > OA_LO) sr = -OA_SR;
+			if (hold > 0) sr = 0;
+			else if (dir > 0 && so < OA_HI) sr = OA_SR; else if (dir < 0 && so > OA_LO) sr = -OA_SR;
 			const double m = vplus(so) - vi, mp = b * sr - s;
 			double tev = rem; int ev = 0;
 			auto cand = [&](double tc, int e) { if (tc >= 0 && tc < tev) { tev = tc; ev = e; } };
-			if (dir > 0 && mp < 0) cand(m / -mp, 1);
+			if (hold > 0) cand(hold, 5);
+			else if (dir > 0 && mp < 0) cand(m / -mp, 1);
 			else if (dir < 0 && mp > 0) cand(-m / mp, 1);
 			if (sr > 0) { cand((OA_HI - so) / sr, 2); if (so < qth) cand((qth - so) / sr, 3); }
 			else if (sr < 0) { cand((OA_LO - so) / sr, 2); if (so > qth) cand((qth - so) / sr, 3); }
 			if (s > 0) cand((OA_HI - vi) / s, 4); else if (s < 0) cand((OA_LO - vi) / s, 4);
 			svi += (vi + 0.5 * s * tev) * tev; sso += (so + 0.5 * sr * tev) * tev;
 			vi += s * tev; so += sr * tev; t += tev;
-			if (ev == 1) dir = -dir;
+			if (hold > 0) hold -= tev;
+			if (ev == 1) { dir = -dir; hold = SCHMITT_TD; }
+			else if (ev == 5) hold = 0;
 			else if (ev == 2) so = sr > 0 ? OA_HI : OA_LO;
 			else if (ev == 3) so = qth + (sr > 0 ? 1e-9 : -1e-9);
 			else if (ev == 4) vi = s > 0 ? OA_HI : OA_LO;
@@ -476,9 +490,7 @@ private:
 		/* ---- laser: 555 U7 at 12 V, R65 5.1k with D3 across R66 22k, C53 10u; VCO U8: C138 10n, R67 120k, R68/R69 51k, R70 47k;
 		   Schmitt R72 51k / R73 100k; Q3 base via D4, R74 10k / R71 2.2k */
 		u7 = T555(); u7.vch = 12.0 - VD; u7.rch = 5.1e3; u7.vdis = 0.1; u7.rdis = 22e3 + 15; u7.C = 10e-6; u7.v = 4.0;
-		/* [CALIBRATED] C138 at 10.8n (its 10n value +8 %, inside tolerance) puts the sweep at the real board's
-		   273..504 Hz; 10n gives 289..550 Hz */
-		vco_las = OpVCO(); vco_las.init(LAS_C138, 120e3, 0.5, 47e3, 51e3, 100e3, 10e3, 2.2e3);
+		vco_las = OpVCO(); vco_las.init(10e-9, 120e3, 0.5, 47e3, 51e3, 100e3, 10e3, 2.2e3);
 		sw_las.init(2.2e-6, par(10e3, 2.2e3), par(25.5e3, 55.2e3), VREF * 55.2 / (25.5 + 55.2), 5.0 * 0.1803);
 
 		/* ---- battleship: LFO U9 (C56+C57 in series = 1.65u, R82 30k, R83/R84 51k, R85 2.2k) Schmitt R86 51k / R88 100k;
@@ -519,7 +531,7 @@ private:
 		/* ---- Super Zaxxon board */
 		sz_t = sz_q = 3.95;
 		u12 = T555(); u12.vch = 12.0; u12.rch = 12e3 + 33e3; u12.vdis = 0.1; u12.rdis = 33e3 + 15; u12.C = 1e-6; u12.v = 5;  /* R1, R2, C5 */
-		vco_eng = OpVCO(); vco_eng.init(0.1e-6, 30e3, 0.5, 3.9e3, 47e3, 100e3, 10e3, 2.2e3);      /* C6, R3, R4/R5, R6; R7/R8 */
+		vco_eng = OpVCO(); vco_eng.init(0.1e-6, 30e3, 0.5, 3.9e3, 47e3, 100e3, 10e3, 27e3);       /* C6, R3, R4/R5, R6; R7/R8; Q1 base R10 10k / R9 27k */
 		sk_rumble.clear(); sk_lowpass(sk_rumble, 15e3, 68e3, 0.1e-6, 0.1e-6, 1.0 + 100.0 / 51.0);  /* U11: R22, R23, C13, C12, R21/R20 */
 		sk_whine.clear(); sk_highpass(sk_whine, 4700e-12, 4700e-12, 47e3, 33e3, 1.0 + 100.0 / 51.0); /* U6: C7, C8, R14, R13, R12/R11 */
 		sw_whine.init(1e-6, par(82e3, 10e3), 17e3, 1.09, VREF * 10.0 / 92.0);
@@ -725,7 +737,7 @@ private:
 				const bool d = sh_z > w + VD;
 				const double g = 1.0 / 1e6 + 1.0 / 2.2e6 + (d ? 1.0 / rw : 0.0);
 				const double vinf = (sh_y / 1e6 + (d ? (w + VD) / rw : 0.0)) / g;
-				sh_z = vinf + (sh_z - vinf) * ek_z(g / 0.68e-6);
+				sh_z = vinf + (sh_z - vinf) * ek_z(g / SHOT_C89);
 			}
 			/* U19a follows Y; U19b: R149 5.6k, R150 33k around 6 V.  U19b also drives U18's CV pin (8 V through 3.33k inside the
 			   555), so near ground it must sink over 2 mA and stops at the LM324's floor: U18 keeps running at idle. */
