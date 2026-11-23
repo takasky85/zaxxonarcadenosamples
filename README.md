@@ -114,9 +114,11 @@ recordings were boosted until about 9–18 % of their samples clipped. The loops
 clipping is the roughness. MAME's samples are also about 9 dB louder against the other sounds than the board's engine.
 
 MAME-style does the same with **no recordings**: it cuts two loops of the same lengths from this emulator's own ship circuit, at the
-two settings the real recordings match (port A = f0 and f3), saturates and clips them by the measured amounts, and plays them with
-MAME's rules and balance. Its spectrum is within about 2 dB of MAME's, clipping harmonics included. On Super Zaxxon it replaces the
-extra board's engine, as MAME does. Board is the default.
+two settings the real recordings match (port A = f0 and f3), saturates them as hard as the recordings, and plays them with MAME's
+rules and balance. Up to 3 kHz its spectrum is within about 3 dB of MAME's, including the third harmonic that makes it rough. It
+leaves out the static: the saturation is smooth instead of a hard clip (hard clipping crackles whenever the noise peaks), nothing
+above 3 kHz is kept, the loop points are crossfaded, and starting, stopping and volume changes glide over 2 ms instead of
+clicking. On Super Zaxxon it replaces the extra board's engine, as MAME does. Board is the default.
 
 ### The MB4391
 

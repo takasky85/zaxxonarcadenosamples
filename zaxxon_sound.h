@@ -329,8 +329,8 @@ public:
 	/* The player ship's engine noise.  ENGINE_BOARD is the circuit.  ENGINE_MAME imitates the way MAME plays the engine from its
 	   sample set: two short recordings looped (0.64 s and 0.75 s), layered, and clipped, which gives MAME's rougher, pulsing
 	   engine.  No recording is used here: the two loops are cut from this emulator's own ship circuit at the two settings the
-	   real-board recordings were made at (port A = f0 and f3), then saturated and clipped by the amounts measured in those
-	   recordings, and played with MAME's rules (see make_loops and the player ship in tick).  Both games use it, as in MAME;
+	   real-board recordings were made at (port A = f0 and f3), then saturated as hard as those recordings (smoothly, so
+	   without their clipping crackle), and played with MAME's rules (see cut_loop and the player ship in tick).  Both games use it, as in MAME;
 	   on Super Zaxxon it replaces the extra board's SOUND OUT A. */
 	enum { ENGINE_BOARD = 0, ENGINE_MAME = 1 };
 	void set_engine_style(int s) { eng_style = s == ENGINE_MAME ? ENGINE_MAME : ENGINE_BOARD; if (eng_style == ENGINE_MAME) make_loops(); }
@@ -338,7 +338,7 @@ public:
 
 	void reset()
 	{
-		pa = pb = pc = 0xff; pos_a = pos_b = 0;
+		pa = pb = pc = 0xff; pos_a = pos_b = 0; gain_a = gain_b = 0;
 		noise = MM5837();
 		fifo.clear(); fir_pos = 0; sub_phase = 0; std::fill(std::begin(firbuf), std::end(firbuf), 0.0); dc_lp = 0;
 		init_parts();
@@ -354,8 +354,8 @@ public:
 		if (port == 0) {
 			const uint8_t fall = pa & ~v; pa = v;
 			if (fall & 0x20) os_bm.trigger();
-			if (fall & 0x04) pos_a = 0;                      /* MAME restarts a looped sample when it is switched on */
-			if (fall & 0x08) pos_b = 0;
+			if ((fall & 0x04) && gain_a < 1e-3) pos_a = 0;   /* MAME restarts a looped sample when it is switched on */
+			if ((fall & 0x08) && gain_b < 1e-3) pos_b = 0;
 		} else if (port == 1) {
 			const uint8_t fall = pb & ~v; pb = v;
 			if (fall & 0x10) os_sexp.trigger();
@@ -407,34 +407,55 @@ private:
 	int eng_style = ENGINE_BOARD;
 	std::vector<float> loop_a, loop_b;          /* ENGINE_MAME loops, scaled to +-1 like a full-scale sample */
 	size_t pos_a = 0, pos_b = 0;
+	double gain_a = 0, gain_b = 0;
+	const double GLIDE = 1.0 - std::exp(-DT / 2e-3);
 	double loop_r = 0;                          /* rms of the board's ship output at port A = f0 (the ship branch's volts) */
 	double last_ship = 0;                       /* the ship branch's output, for make_loops */
 
-	/* Cut a loop from a second, board-mode copy of the sound board with port A held at port_a.  The board's noise is roughly
-	   Gaussian; tanh(k x) then a clip at c times its rms reproduce how much of each MAME recording is flattened at full scale
-	   and its rms-to-peak ratio (05.wav: 18 % of samples clipped, rms 0.71 of peak; 04.wav: 8.8 %, 0.62). */
-	static double cut_loop(uint8_t port_a, double settle, double secs, double k, double c, std::vector<float> &out)
+	/* Cut a loop from a second, board-mode copy of the sound board with port A held at port_a.
+	   MAME's two recordings were boosted into hard clipping, and that adds a crackle of high harmonics whenever the noise
+	   peaks, which reads as static.  So the loop is saturated smoothly instead (tanh, with k set so its rms-to-peak ratio
+	   matches the recording's: 0.71 for 05.wav, 0.62 for 04.wav), which keeps the low harmonics that make it rough (the
+	   third harmonic sits at MAME's level), then low-passed at 3 kHz so nothing fizzes above.  The end of the loop fades
+	   into the noise just before its start, so the loop point makes no click. */
+	static double cut_loop(uint8_t port_a, double settle, double secs, double k, std::vector<float> &out)
 	{
 		auto t = std::make_unique<ZaxSound>();
 		t->write(0, port_a);
 		for (int i = 0; i < 4000; i++) t->ship_dac(port_a, 1e-3);    /* C25 takes seconds to settle: jump it there */
 		t->ship_g = t->cds_target(); t->set_mfb();
 		t->run((int)(FS * settle));
-		const int n = (int)std::lrint(secs * FS);
-		std::vector<double> x(n);
+		const int n = (int)std::lrint(secs * FS), m = (int)(FS * 0.01);
+		std::vector<double> x(n + m);
 		double ss = 0;
-		for (int i = 0; i < n; i++) { t->tick(); x[i] = t->last_ship; ss += x[i] * x[i]; }
-		const double r = std::sqrt(ss / n), zc = std::tanh(k * c);
-		out.resize(n);
-		for (int i = 0; i < n; i++) out[i] = (float)clampd(std::tanh(k * x[i] / r) / zc, -1.0, 1.0);
+		for (int i = 0; i < n + m; i++) { t->tick(); x[i] = t->last_ship; if (i >= m) ss += x[i] * x[i]; }
+		const double r = std::sqrt(ss / n);
+		for (double &v : x) v = std::tanh(k * v / r);
+		/* the loop is x[m .. m+n); its last m samples fade (equal power) into x[0 .. m), which leads into x[m] */
+		std::vector<double> y(x.begin() + m, x.end());
+		for (int j = 0; j < m; j++) {
+			const double w = (j + 0.5) / m * PI / 2;
+			y[n - m + j] = y[n - m + j] * std::cos(w) + x[j] * std::sin(w);
+		}
+		/* 3 kHz Butterworth low-pass, run round the loop twice so it wraps without a seam */
+		const double w0 = 2 * PI * 3000.0 / FS, al = std::sin(w0) / (2 * 0.7071), cw = std::cos(w0), a0 = 1 + al;
+		const double b0 = (1 - cw) / 2 / a0, b1 = (1 - cw) / a0, a1 = -2 * cw / a0, a2 = (1 - al) / a0;
+		double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+		for (int pass = 0; pass < 2; pass++)
+			for (int i = 0; i < n; i++) {
+				const double v = b0 * y[i] + b1 * x1 + b0 * x2 - a1 * y1 - a2 * y2;
+				x2 = x1; x1 = y[i]; y2 = y1; y1 = v;
+				if (pass) y[i] = v;
+			}
+		out.assign(y.begin(), y.end());
 		return r;
 	}
 	void make_loops()
 	{
 		if (!loop_a.empty()) return;
 		/* different settle times so the two loops hold different stretches of the noise generator's sequence */
-		loop_r = cut_loop(0xf0, 0.2, 0.6354, 1.087, 1.338, loop_a);            /* like 05.wav, 627 Hz */
-		cut_loop(0xf3, 0.9, 0.7516, 0.737, 1.706, loop_b);                      /* like 04.wav, 331 Hz */
+		loop_r = cut_loop(0xf0, 0.2, 0.6354, 1.359, loop_a);            /* like 05.wav, 627 Hz */
+		cut_loop(0xf3, 0.9, 0.7516, 0.973, loop_b);                      /* like 04.wav, 331 Hz */
 	}
 	uint8_t pa = 0xff, pb = 0xff, pc = 0xff;
 
@@ -637,10 +658,15 @@ private:
 			   engine is 21 dB above this emulator's board engine while its other samples are about 12 dB above this emulator's
 			   other sounds, so the loops play about 9 dB above the board engine there] */
 			static constexpr double MAME_K = 5.9;
+			/* MAME switches and rescales a sample at once; here each loop's gain glides over about 2 ms, so a port write
+			   (start, stop or a new volume) does not click */
+			const double vol = 0.5 + 0.157 * (pa & 3);
+			gain_a += ((!(pa & 0x04) ? vol : 0.0) - gain_a) * GLIDE;
+			gain_b += ((!(pa & 0x08) ? vol : 0.0) - gain_b) * GLIDE;
 			double v = 0;
-			if (!(pa & 0x04)) { v += loop_a[pos_a]; if (++pos_a >= loop_a.size()) pos_a = 0; }
-			if (!(pa & 0x08)) { v += loop_b[pos_b]; if (++pos_b >= loop_b.size()) pos_b = 0; }
-			sj += br[B_SHIP].k * br[B_SHIP].g * MAME_K * loop_r * (0.5 + 0.157 * (pa & 3)) * v;
+			if (gain_a > 1e-4) { v += gain_a * loop_a[pos_a]; if (++pos_a >= loop_a.size()) pos_a = 0; }
+			if (gain_b > 1e-4) { v += gain_b * loop_b[pos_b]; if (++pos_b >= loop_b.size()) pos_b = 0; }
+			sj += br[B_SHIP].k * br[B_SHIP].g * MAME_K * loop_r * v;
 		}
 		/* ================= player ship (Zaxxon) ================= */
 		else {
