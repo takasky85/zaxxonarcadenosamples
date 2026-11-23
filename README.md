@@ -132,18 +132,19 @@ this repository and are never played):
 | Cannon (your ship's fire) | noise through a filter sweeping 3.7 → 1.85 kHz | same sweep |
 | Small / medium explosion | low-passed noise, fade within about 2 dB | same spectrum |
 | Player ship (port A = f0) | 622 Hz | 626–633 Hz |
-| Laser (force field) | 287–558 Hz sweep, 0.19 s period | 274–507 Hz, 0.19 s |
-| Homing missile | about 900 Hz | about 1000 Hz |
+| Laser (force field) | 267–510 Hz sweep, 0.19 s period | 273–504 Hz, 0.19 s |
+| Homing missile | 900–1125 Hz, median 1012 Hz, 15 Hz wobble | 950–1125 Hz, median 1019 Hz, 14 Hz |
 
-The laser and homing missile are within normal component tolerance (5–10 %). The recording named `02.wav` (base missile) has the
-same spectrum as the player-ship recording; the emulator follows the drawing (filtered noise) instead.
+The recording named `02.wav` (base missile) has the same spectrum as the player-ship recording; the emulator follows the drawing
+(filtered noise) instead.
 
 ### What was calibrated, and what is assumed
 
-Four numbers were set from the recordings because the drawings and data sheets do not fix them; they are marked `[CALIBRATED]` in
+These were set from the recordings because the drawings and data sheets do not fix them; they are marked `[CALIBRATED]` in
 the source: the MB4391 curve (above), the LM324's output floor when sinking current (0.636 V at 1 mA, which sets the battleship
-pitch), the 556 comparator delay of the alarm clock (1.15 µs), and the CdS cell's resistance at full LED current (sets the engine's
-pitch). The cannon transistor uses textbook Ebers-Moll values (reverse beta 3).
+pitch), the 556 comparator delay of the alarm clock (1.15 µs), the CdS cell's resistance at full LED current (sets the engine's
+pitch), and two timing capacitors set inside their tolerance: the homing missile's C45 at 9.1 nF (drawn 10 nF; 10 nF plays about
+10 % low) and the laser's C138 at 10.8 nF (drawn 10 nF; 10 nF plays 6–9 % high). The cannon transistor uses textbook Ebers-Moll values (reverse beta 3).
 
 Marked `[ASSUMPTION]`: the outputs of U14 and U15 both reach R177 (that trace is unreadable on the scan), Super Zaxxon's SOUND OUT B
 has a 200 Ω source impedance, the photocell's speed (8 ms to brighten, 40 ms to darken) and LED drop, and a 0.3 µs comparator delay

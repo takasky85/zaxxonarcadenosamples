@@ -66,6 +66,7 @@ static inline double oneshot_t(double r, double c) { return 0.28 * r * c * (1.0 
    that the output PNP has to conduct, which needs about one Vbe.  [CALIBRATED: VFLOOR at 1 mA, which puts the
    battleship tone, whose pitch is set by this floor, at the 132 Hz of a real board] */
 static constexpr double VFLOOR = 0.636;
+static constexpr double HM_C45 = 9.1e-9, LAS_C138 = 10.8e-9;   /* [CALIBRATED] see init_parts() */
 static inline double oa_floor(double i)
 {
 	return i <= 50e-6 ? OA_LO : std::max(OA_LO, VFLOOR + 0.026 * std::log((i - 50e-6) / 1e-3));
@@ -462,7 +463,9 @@ private:
 		/* ---- homing missile: 555 U6 at 5 V, R48 47k, R49 68k, C45 10n; output pulled up by R50 3.3k, loaded by R51+R52 */
 		hm_c43 = 5.0; hm_so = OA_HI;
 		hm_cv.set(3333.0 * 33e-6, 0);                                 /* C46 33u into the CV pin's 3.33k */
-		u6 = T555(); u6.vch = 5.0; u6.rch = 47e3 + 68e3; u6.vdis = 0.1; u6.rdis = 68e3 + 15; u6.C = 10e-9;
+		/* [CALIBRATED] C45 at 9.1n (its 10n value -9 %, inside a ceramic disc's tolerance) puts the pitch at the
+		   real board's 950..1120 Hz; 10n gives 840..1020 Hz */
+		u6 = T555(); u6.vch = 5.0; u6.rch = 47e3 + 68e3; u6.vdis = 0.1; u6.rdis = 68e3 + 15; u6.C = HM_C45;
 		u6.vhi = 5.0 * 15.3 / 18.6; u6.vlo = 0.1; u6.v = 2.0;
 		sw_hm.init(10e-6, par(12e3, 3.3e3), par(25.5e3, 49e3), VREF * 49 / (25.5 + 49), 0.5);
 
@@ -473,7 +476,9 @@ private:
 		/* ---- laser: 555 U7 at 12 V, R65 5.1k with D3 across R66 22k, C53 10u; VCO U8: C138 10n, R67 120k, R68/R69 51k, R70 47k;
 		   Schmitt R72 51k / R73 100k; Q3 base via D4, R74 10k / R71 2.2k */
 		u7 = T555(); u7.vch = 12.0 - VD; u7.rch = 5.1e3; u7.vdis = 0.1; u7.rdis = 22e3 + 15; u7.C = 10e-6; u7.v = 4.0;
-		vco_las = OpVCO(); vco_las.init(10e-9, 120e3, 0.5, 47e3, 51e3, 100e3, 10e3, 2.2e3);
+		/* [CALIBRATED] C138 at 10.8n (its 10n value +8 %, inside tolerance) puts the sweep at the real board's
+		   273..504 Hz; 10n gives 289..550 Hz */
+		vco_las = OpVCO(); vco_las.init(LAS_C138, 120e3, 0.5, 47e3, 51e3, 100e3, 10e3, 2.2e3);
 		sw_las.init(2.2e-6, par(10e3, 2.2e3), par(25.5e3, 55.2e3), VREF * 55.2 / (25.5 + 55.2), 5.0 * 0.1803);
 
 		/* ---- battleship: LFO U9 (C56+C57 in series = 1.65u, R82 30k, R83/R84 51k, R85 2.2k) Schmitt R86 51k / R88 100k;
