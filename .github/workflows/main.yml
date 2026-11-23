@@ -2,9 +2,17 @@ name: Build and Release with DLLs
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
+  pull_request:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag, for example v1.0 (empty: a dated v0.0.0-manual tag)'
+        required: false
+        default: ''
 
 jobs:
   build:
@@ -44,11 +52,16 @@ jobs:
           fi
 
       - name: Generate Tag for Manual Runs
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         id: tag
         shell: bash
+        env:
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
         run: |
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
             VERSION="${GITHUB_REF#refs/tags/}"
+          elif [[ -n "$INPUT_TAG" ]]; then
+            VERSION="$INPUT_TAG"
           else
             VERSION="v0.0.0-manual-$(date +'%Y%m%d-%H%M%S')"
           fi
@@ -57,11 +70,24 @@ jobs:
       - name: Create Zip Archive
         shell: pwsh
         run: |
-          Compress-Archive -Path zaxxon.exe, SDL3.dll, libwinpthread-1.dll, libiconv-2.dll -DestinationPath zaxxon-windows.zip -Force
+          Compress-Archive -Path zaxxon.exe, SDL3.dll, libwinpthread-1.dll, libiconv-2.dll, README.md, THIRD-PARTY-NOTICES.txt, OFL.txt -DestinationPath zaxxon-windows.zip -Force
+
+      - name: Upload the Windows zip as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zaxxon-windows
+          path: zaxxon-windows.zip
 
       - name: Create Release and Upload Assets
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag_name }}
+          # tag the commit that was built (without this a new tag is made on the default branch)
+          target_commitish: ${{ github.sha }}
+          body: |
+            Zaxxon and Super Zaxxon for Windows 11 x64, with the sound boards simulated at the circuit level: no recorded samples.
+            Unzip, run zaxxon.exe and point it at your own MAME szaxxon.zip and/or zaxxon.zip (no ROMs are included).
+            README.md in the zip explains the menu, the Board / MAME-style engine switch and the MB4391 / MC3340 switch.
           files: |
             zaxxon-windows.zip

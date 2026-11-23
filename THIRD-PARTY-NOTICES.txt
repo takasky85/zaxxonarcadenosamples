@@ -1,9 +1,9 @@
 THIRD-PARTY NOTICES
 ===================
 
-1. MAME  (hardware, memory map, ROM definitions, video, 315-5013 decryption, MM5837 and MB4391 behaviour)
+1. MAME  (hardware, memory map, ROM definitions, video, 315-5013 decryption, MM5837 clock and levels, MB4391 pinout)
 ------------------------------------------------------------------------------
-Behaviour and data tables in zaxxon_machine.h and zaxxon_synth.h follow the MAME source
+Behaviour and data tables in zaxxon_machine.h and zaxxon_sound.h follow the MAME source
 (zaxxon.cpp, zaxxon_v.cpp, zaxxon_a.cpp, segacrpt_device.cpp, mm5837.cpp, nl_brdrline.cpp).  The code here is a re-implementation.
 
 BSD 3-Clause License
@@ -59,7 +59,14 @@ and to alter it and redistribute it freely, subject to the following restriction
 3. This notice may not be removed or altered from any source distribution.
 
 
-4. Other
+4. Press Start 2P  (the menu font; font8.h is an 8x8 bitmap conversion of it)
+-----------------------------------------------------------------------------
+Font by CodeMan38 (http://www.zone38.net/).
+Copyright 2012 The Press Start 2P Project Authors (cody@zone38.net), with Reserved Font Name "Press Start 2P".
+This Font Software is licensed under the SIL Open Font License, Version 1.1.  The full licence is in OFL.txt.
+The bitmap in font8.h is a Modified Version (a format conversion) and is under the same licence.
+
+5. Other
 --------
 * The sound circuits were modelled from the "IC Board A - Super ZAXXON" schematics supplied by the user.
 * The Zaxxon / Super Zaxxon name and game are the property of their owners (Sega).  No ROMs are included.
