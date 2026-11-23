@@ -18,7 +18,7 @@
 
 #include "z80.h"
 #include "romzip.h"
-#include "zaxxon_synth.h"
+#include "zaxxon_sound.h"
 
 namespace zx {
 
@@ -189,7 +189,7 @@ struct Machine {
 	std::vector<uint8_t> bgmap;           /* 256 x 4096 background pixmap (pen indices 0..127) */
 
 	/* audio */
-	ZaxSynth synth;
+	zsnd::ZaxSound synth;                 /* the sound board, simulated at the circuit level (zaxxon_sound.h) */
 	struct SndEv { int cyc; int port; uint8_t v; };
 	std::vector<SndEv> sndev;
 	std::vector<int16_t> audio;           /* FRAME_SMP samples per frame */
@@ -279,6 +279,7 @@ struct Machine {
 		latch1 = latch2 = 0; int_en = irq_line = flip = false; bg_enable = false;
 		bg_color = fg_color = 0; bg_pos = 0; coin_status[0] = coin_status[1] = coin_status[2] = 0;
 		ppi_out[0] = ppi_out[1] = ppi_out[2] = 0;
+		synth.set_board(set_id == SET_SZAXXON);   /* Super Zaxxon has the extra sound board in the 8255 socket */
 		synth.reset();
 		sndev.clear(); audio.assign(FRAME_SMP, 0); frames = 0; cyc_in_frame = 0;
 		memset(fb, 0, sizeof fb);
@@ -480,16 +481,18 @@ struct Machine {
 		if (int_en) irq_line = true;              /* vblank interrupt */
 		render();
 		run_cycles(FRAME_CYC - cyc_in_frame);
-		/* audio for this frame: apply the 8255 writes at their sample positions */
-		audio.assign(FRAME_SMP, 0);
+		/* audio for this frame: the sound board runs at 4 x 48 kHz; each 8255 write lands on its own 5.2 us step */
+		const int nsub = FRAME_SMP * zsnd::OS;
 		int pos = 0;
 		for (auto &e : sndev) {
-			int at = (int)((long long)e.cyc * FRAME_SMP / FRAME_CYC);
-			if (at > FRAME_SMP) at = FRAME_SMP;
-			if (at > pos) { synth.render(&audio[pos], at - pos); pos = at; }
-			synth.ppi_write(e.port, e.v);
+			int at = (int)((long long)e.cyc * nsub / FRAME_CYC);
+			if (at > nsub) at = nsub;
+			if (at > pos) { synth.run(at - pos); pos = at; }
+			synth.write(e.port, e.v);
 		}
-		if (pos < FRAME_SMP) synth.render(&audio[pos], FRAME_SMP - pos);
+		if (pos < nsub) synth.run(nsub - pos);
+		audio.assign(FRAME_SMP, 0);
+		synth.take(audio.data(), FRAME_SMP);
 		if (volume != 1.0f) for (auto &s : audio) { int v = (int)(s * volume); s = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v); }
 		apply_cheats();
 		frames++;
@@ -526,16 +529,16 @@ static void write_bmp(const char *path, const uint32_t *px, int w, int h)
 	fclose(f);
 }
 
-static void write_wav(const char *path, const std::vector<int16_t> &s)
+static bool write_wav(const char *path, const std::vector<int16_t> &s)
 {
 	FILE *f = fopen(path, "wb");
-	if (!f) { perror(path); return; }
+	if (!f) { perror(path); return false; }
 	uint32_t n = (uint32_t)(s.size() * 2), rate = RATE, br = RATE * 2;
 	auto w32 = [&](uint32_t v) { fwrite(&v, 4, 1, f); };
 	auto w16 = [&](uint16_t v) { fwrite(&v, 2, 1, f); };
 	fwrite("RIFF", 1, 4, f); w32(36 + n); fwrite("WAVEfmt ", 1, 8, f); w32(16); w16(1); w16(1); w32(rate); w32(br); w16(2); w16(16);
 	fwrite("data", 1, 4, f); w32(n); fwrite(s.data(), 2, s.size(), f);
-	fclose(f);
+	return fclose(f) == 0;
 }
 
 } // namespace zx

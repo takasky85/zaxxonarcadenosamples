@@ -1,9 +1,9 @@
 THIRD-PARTY NOTICES
 ===================
 
-1. MAME  (hardware, memory map, ROM definitions, video, 315-5013 decryption, MM5837 and MB4391 behaviour)
+1. MAME  (hardware, memory map, ROM definitions, video, 315-5013 decryption, MM5837 clock and levels, MB4391 pinout)
 ------------------------------------------------------------------------------
-Behaviour and data tables in zaxxon_machine.h and zaxxon_synth.h follow the MAME source
+Behaviour and data tables in zaxxon_machine.h and zaxxon_sound.h follow the MAME source
 (zaxxon.cpp, zaxxon_v.cpp, zaxxon_a.cpp, segacrpt_device.cpp, mm5837.cpp, nl_brdrline.cpp).  The code here is a re-implementation.
 
 BSD 3-Clause License

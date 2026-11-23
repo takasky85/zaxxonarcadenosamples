@@ -1,8 +1,8 @@
 /*
  * Zaxxon / Super Zaxxon (Sega, 1982) - a small standalone emulator with synthesized sound.
  *
- * The game board is emulated after MAME's zaxxon driver; the discrete analog sound board is not
- * played back from samples but calculated from a model of its circuit (zaxxon_synth.h).
+ * The game board is emulated after MAME's zaxxon driver; the discrete analog sound board (and Super Zaxxon's
+ * extra sound board) is not played back from samples but simulated at the circuit level (zaxxon_sound.h).
  * You need to supply the ROMs yourself (MAME "szaxxon.zip" or "zaxxon.zip"; the set is detected automatically).
  */
 #include <SDL3/SDL.h>
@@ -43,9 +43,12 @@ static void usage()
 "  --cheat LIST     any of: lives,fuel,invincible  (or all);  they can also be switched in the menu\n"
 "  --integer        integer-multiple scaling only (default: fill the window, nearest-neighbour)\n"
 "  --reset-settings ignore and overwrite the saved settings\n"
+"  --mc3340         simulate the MB4391 volume chips with the Motorola MC3340's curve (the repair part)\n"
+"                   instead of the curve fitted to a real board (can also be switched in the menu)\n"
 "  --sound-test     the sound board on its own (no ROMs needed): press keys to trigger every sound\n"
 "  --sound-demo F   write every sound, one after the other, to the WAV file F and exit (no ROMs needed)\n"
 "  --sound-wavs DIR write one WAV per sound into DIR, named like MAME's sample files (00.wav ... 23.wav), and exit\n"
+"                   (also sz_*.wav: the Super Zaxxon engine and boss sounds from its extra sound board)\n"
 "  --headless       no window or audio device; run --frames N and exit\n"
 "  --frames N       frames to run in headless mode (default 600)\n"
 "  --wav FILE       headless: write the audio to a WAV file\n"
@@ -75,7 +78,7 @@ static const SoundItem SOUND_ITEMS[] = {
 };
 
 struct SoundTest {
-	ZaxSynth syn;
+	zsnd::ZaxSound syn;
 	uint8_t port[3] = { 0xff, 0xff, 0xff };
 	int pulse[3][8] = {};
 	int ship_on = 0, ship_ab = 0;                 /* player ship: on/off and the A/B bits (0..3) */
@@ -100,7 +103,7 @@ struct SoundTest {
 	}
 };
 
-static void sound_demo(const char *path)
+static void sound_demo(const char *path, int vca)
 {
 	/* each sound for a few seconds, one after the other, with a short gap */
 	struct Step { const char *name; int port; uint8_t bit; double on, total; };
@@ -111,78 +114,89 @@ static void sound_demo(const char *path)
 	};
 	std::vector<int16_t> all;
 	for (const Step &s : steps) {
-		ZaxSynth syn; uint8_t p[3] = { 0xff, 0xff, 0xff };
+		zsnd::ZaxSound syn; syn.set_vca_model(vca); uint8_t p[3] = { 0xff, 0xff, 0xff };
 		const int n = (int)(s.total * RATE), non = (int)(s.on * RATE);
 		std::vector<int16_t> b(n);
 		syn.render(b.data(), 2400);
-		p[s.port] &= ~s.bit; syn.ppi_write(s.port, p[s.port]);
+		p[s.port] &= ~s.bit; syn.write(s.port, p[s.port]);
 		syn.render(b.data() + 2400, non);
-		p[s.port] |= s.bit; syn.ppi_write(s.port, p[s.port]);
+		p[s.port] |= s.bit; syn.write(s.port, p[s.port]);
 		syn.render(b.data() + 2400 + non, n - 2400 - non);
 		all.insert(all.end(), b.begin(), b.end());
 		all.insert(all.end(), RATE / 2, 0);
 	}
-	/* player ship: A/B = 0..3 with D low (the values the game uses are f4..f7) */
-	for (int ab = 0; ab < 4; ab++) {
-		ZaxSynth syn; std::vector<int16_t> b(3 * RATE);
-		syn.render(b.data(), 2400);
-		syn.ppi_write(0, (uint8_t)(0xf4 | ab)); syn.render(b.data() + 2400, 2 * RATE);
-		syn.ppi_write(0, 0xff); syn.render(b.data() + 2400 + 2 * RATE, RATE - 2400);
-		all.insert(all.end(), b.begin(), b.end());
-		all.insert(all.end(), RATE / 2, 0);
-	}
+	/* player ship (Zaxxon board, then Super Zaxxon's engine board): the values the games write, f0..f7 */
+	for (int board = 0; board < 2; board++)
+		for (int ab = 0; ab < 8; ab++) {
+			if (board == 1 && ab < 4) continue;               /* Super Zaxxon only uses f4..f7 */
+			zsnd::ZaxSound syn; syn.set_vca_model(vca); syn.set_board(board == 1);
+			std::vector<int16_t> b(3 * RATE);
+			syn.render(b.data(), 2400);
+			syn.write(0, (uint8_t)(0xf0 | ab)); syn.render(b.data() + 2400, 2 * RATE);
+			syn.write(0, 0xff); syn.render(b.data() + 2400 + 2 * RATE, RATE - 2400);
+			all.insert(all.end(), b.begin(), b.end());
+			all.insert(all.end(), RATE / 2, 0);
+		}
 	write_wav(path, all);
 	fprintf(stderr, "wrote %s (%.1f s)\n", path, all.size() / (double)RATE);
 }
 
 
 /* one WAV per sound, named like the MAME sample files so they can be compared side by side */
-static void sound_wavs(const std::string &dir)
+static void sound_wavs(const std::string &dir, int vca)
 {
-	struct Item { const char *file; const char *what; int port; uint8_t on; uint8_t off; double on_s, total_s; };
+	struct Item { const char *file; const char *what; int port; uint8_t on; uint8_t off; double on_s, total_s; bool sz; };
 	/* on/off = the value written to the port to start / stop; one-shots only need the start (their own one-shot ends them) */
 	static const Item items[] = {
-		{ "00", "Battleship (end-of-level boss), looped",      0, 0x7f, 0xff, 6.0, 7.0 },
-		{ "01", "Laser (force field), looped",                 0, 0xbf, 0xff, 5.0, 6.0 },
-		{ "02", "Base missile, one-shot",                      0, 0xdf, 0xff, 0.1, 6.0 },
-		{ "03", "Homing missile, looped",                      0, 0xef, 0xff, 6.0, 7.0 },
-		/* the MAME samples 04 / 05 are narrow-band tones of about 331 Hz and 626 Hz; of the four A/B settings the engine filter gives
-		   about 229, 408, 537 and 646 Hz, so these two files use the closest ones (A/B = 1 and A/B = 0) */
-		{ "04", "Player ship, D low only, A/B bits = 1 (closest to the 331 Hz sample)", 0, 0xf5, 0xff, 5.0, 6.5 },
-		{ "05", "Player ship, D low only, A/B bits = 0 (closest to the 626 Hz sample)", 0, 0xf4, 0xff, 5.0, 6.5 },
-		{ "08", "Cannon (your ship's fire), one-shot",         1, 0x7f, 0xff, 0.1, 3.0 },
-		{ "10", "M-Exp (ship explosion), one-shot",            1, 0xdf, 0xff, 0.1, 5.0 },
-		{ "11", "S-Exp (enemy explosion), one-shot",           1, 0xef, 0xff, 0.1, 4.0 },
-		{ "20", "Alarm 3 (low fuel), one-shot",                2, 0xf7, 0xff, 0.1, 2.0 },
-		{ "21", "Alarm 2 (target lock), one-shot",             2, 0xfb, 0xff, 0.1, 2.0 },
-		{ "23", "Shot (enemy fire), one-shot",                 2, 0xfe, 0xff, 0.1, 3.0 },
-		/* extras: the ship engine at the other A/B settings (bits 0,1), D low only and C+D low */
-		{ "04_ab0", "Player ship, D low only, A/B bits = 0",   0, 0xf4, 0xff, 5.0, 6.5 },
-		{ "04_ab1", "Player ship, D low only, A/B bits = 1",   0, 0xf5, 0xff, 5.0, 6.5 },
-		{ "04_ab2", "Player ship, D low only, A/B bits = 2",   0, 0xf6, 0xff, 5.0, 6.5 },
-		{ "05_ab0", "Player ship, C and D low, A/B bits = 0",  0, 0xf0, 0xff, 5.0, 6.5 },
-		{ "05_ab1", "Player ship, C and D low, A/B bits = 1",  0, 0xf1, 0xff, 5.0, 6.5 },
-		{ "05_ab2", "Player ship, C and D low, A/B bits = 2",  0, 0xf2, 0xff, 5.0, 6.5 },
+		{ "00", "Battleship (end-of-level boss), held on",       0, 0x7f, 0xff, 6.0, 7.0, false },
+		{ "01", "Laser (force field), held on",                  0, 0xbf, 0xff, 5.0, 6.0, false },
+		{ "02", "Base missile, one-shot",                        0, 0xdf, 0xff, 0.1, 6.0, false },
+		{ "03", "Homing missile, held on",                       0, 0xef, 0xff, 6.0, 7.0, false },
+		{ "04", "Player ship, channel 2 (port A = f5)",          0, 0xf5, 0xff, 5.0, 6.5, false },
+		{ "05", "Player ship, channel 1 (port A = f0)",          0, 0xf0, 0xff, 5.0, 6.5, false },
+		{ "08", "Cannon (your ship's fire), one-shot",           1, 0x7f, 0xff, 0.1, 3.0, false },
+		{ "10", "M-Exp (ship explosion), one-shot",              1, 0xdf, 0xff, 0.1, 5.0, false },
+		{ "11", "S-Exp (enemy explosion), one-shot",             1, 0xef, 0xff, 0.1, 4.0, false },
+		{ "20", "Alarm 3 (low fuel), one-shot",                  2, 0xf7, 0xff, 0.1, 2.0, false },
+		{ "21", "Alarm 2 (target lock), one-shot",               2, 0xfb, 0xff, 0.1, 2.0, false },
+		{ "23", "Shot (enemy fire), one-shot",                   2, 0xfe, 0xff, 0.1, 3.0, false },
+		/* extras: every player-ship value the games write */
+		{ "ship_f0", "Zaxxon player ship, port A = f0",          0, 0xf0, 0xff, 5.0, 6.5, false },
+		{ "ship_f1", "Zaxxon player ship, port A = f1",          0, 0xf1, 0xff, 5.0, 6.5, false },
+		{ "ship_f2", "Zaxxon player ship, port A = f2",          0, 0xf2, 0xff, 5.0, 6.5, false },
+		{ "ship_f3", "Zaxxon player ship, port A = f3",          0, 0xf3, 0xff, 5.0, 6.5, false },
+		{ "ship_f4", "Zaxxon player ship, port A = f4",          0, 0xf4, 0xff, 5.0, 6.5, false },
+		{ "ship_f5", "Zaxxon player ship, port A = f5",          0, 0xf5, 0xff, 5.0, 6.5, false },
+		{ "ship_f6", "Zaxxon player ship, port A = f6",          0, 0xf6, 0xff, 5.0, 6.5, false },
+		{ "ship_f7", "Zaxxon player ship, port A = f7",          0, 0xf7, 0xff, 5.0, 6.5, false },
+		{ "sz_ship_f4", "Super Zaxxon player ship (extra board), port A = f4", 0, 0xf4, 0xff, 5.0, 6.5, true },
+		{ "sz_ship_f5", "Super Zaxxon player ship (extra board), port A = f5", 0, 0xf5, 0xff, 5.0, 6.5, true },
+		{ "sz_ship_f6", "Super Zaxxon player ship (extra board), port A = f6", 0, 0xf6, 0xff, 5.0, 6.5, true },
+		{ "sz_ship_f7", "Super Zaxxon player ship (extra board), port A = f7", 0, 0xf7, 0xff, 5.0, 6.5, true },
+		{ "sz_00", "Super Zaxxon boss: battleship tone + the extra board's SOUND OUT B", 0, 0x7f, 0xff, 6.0, 7.0, true },
 	};
-	std::string index = "File           Sound (MAME sample names)\n";
+	SDL_CreateDirectory(dir.c_str());                 /* fine if it already exists */
+	std::string index = "File              Sound (MAME sample names where there is one)\n";
+	int written = 0;
 	for (const Item &it : items) {
-		ZaxSynth syn;
+		zsnd::ZaxSound syn; syn.set_vca_model(vca); syn.set_board(it.sz);
 		const int lead = RATE / 10, non = (int)(it.on_s * RATE), n = (int)(it.total_s * RATE);
 		std::vector<int16_t> b(lead + n);
 		syn.render(b.data(), lead);
-		syn.ppi_write(it.port, it.on);
+		syn.write(it.port, it.on);
 		syn.render(b.data() + lead, non);
-		syn.ppi_write(it.port, it.off);
+		syn.write(it.port, it.off);
 		syn.render(b.data() + lead + non, n - non);
 		const std::string path = dir + "/" + it.file + ".wav";
-		write_wav(path.c_str(), b);
+		if (!write_wav(path.c_str(), b)) continue;
+		written++;
 		index += std::string(it.file) + ".wav";
-		index.append(15 - strlen(it.file) - 4, ' ');
+		index.append(std::max<size_t>(1, 18 - strlen(it.file) - 4), ' ');
 		index += std::string(it.what) + "\n";
 	}
 	FILE *f = fopen((dir + "/sounds.txt").c_str(), "w");
 	if (f) { fputs(index.c_str(), f); fclose(f); }
-	fprintf(stderr, "wrote %d WAV files (48 kHz, 16-bit, mono) into %s\n", (int)(sizeof items / sizeof items[0]), dir.c_str());
+	fprintf(stderr, "wrote %d WAV files (48 kHz, 16-bit, mono) into %s\n", written, dir.c_str());
 }
 
 /* ------------------------------------------------------------------ file dialogs */
@@ -200,6 +214,7 @@ struct Opts {
 	bool inf_lives = false, inf_fuel = false, invincible = false;
 	bool integer = false, rotate = true, fullscreen = false;
 	int volume = 100;                              /* percent */
+	int vca = 0;                                   /* 0 = MB4391 (curve fitted to a real board), 1 = MC3340 */
 };
 static Opts O;
 
@@ -216,6 +231,7 @@ static void apply_opts()
 	M.dsw02 = make_dsw02();
 	M.volume = O.volume / 100.0f;
 	M.cheat_lives = O.inf_lives; M.cheat_fuel = O.inf_fuel; M.cheat_invincible = O.invincible;
+	M.synth.set_vca_model(O.vca);
 }
 
 static std::string settings_path()
@@ -236,6 +252,7 @@ static void settings_load()
 		else if (key == "hard") O.hard = v; else if (key == "inf_lives") O.inf_lives = v; else if (key == "inf_fuel") O.inf_fuel = v;
 		else if (key == "invincible") O.invincible = v; else if (key == "integer") O.integer = v; else if (key == "rotate") O.rotate = v;
 		else if (key == "fullscreen") O.fullscreen = v; else if (key == "volume") O.volume = v;
+		else if (key == "vca") O.vca = v ? 1 : 0;
 	}
 	fclose(f);
 }
@@ -243,8 +260,8 @@ static void settings_save()
 {
 	const std::string path = settings_path(); if (path.empty()) return;
 	FILE *f = fopen(path.c_str(), "w"); if (!f) return;
-	fprintf(f, "lives=%d\nbonus=%d\nfree_play=%d\nhard=%d\ninf_lives=%d\ninf_fuel=%d\ninvincible=%d\ninteger=%d\nrotate=%d\nfullscreen=%d\nvolume=%d\n",
-		O.lives, O.bonus, O.free_play, O.hard, O.inf_lives, O.inf_fuel, O.invincible, O.integer, O.rotate, O.fullscreen, O.volume);
+	fprintf(f, "lives=%d\nbonus=%d\nfree_play=%d\nhard=%d\ninf_lives=%d\ninf_fuel=%d\ninvincible=%d\ninteger=%d\nrotate=%d\nfullscreen=%d\nvolume=%d\nvca=%d\n",
+		O.lives, O.bonus, O.free_play, O.hard, O.inf_lives, O.inf_fuel, O.invincible, O.integer, O.rotate, O.fullscreen, O.volume, O.vca);
 	fclose(f);
 }
 
@@ -270,7 +287,7 @@ static bool boot(const std::vector<std::string> &paths, bool search_default)
 }
 
 enum { MI_RESUME, MI_LIVES_CHEAT, MI_FUEL_CHEAT, MI_INVINCIBLE, MI_LIVES, MI_BONUS, MI_FREEPLAY, MI_DIFF, MI_SCALE, MI_ROTATE,
-       MI_VOLUME, MI_FULLSCREEN, MI_RESET, MI_LOAD, MI_QUIT, MI_COUNT };
+       MI_VOLUME, MI_VCA, MI_FULLSCREEN, MI_RESET, MI_LOAD, MI_QUIT, MI_COUNT };
 
 int main(int argc, char **argv)
 {
@@ -282,7 +299,7 @@ int main(int argc, char **argv)
 	int scale = 3;
 
 	/* command-line values override the saved settings, so remember which were given */
-	struct Cli { int lives = -1, bonus = -1, volume = -1, free_play = -1, hard = -1, integer = -1, rotate = -1;
+	struct Cli { int lives = -1, bonus = -1, volume = -1, free_play = -1, hard = -1, integer = -1, rotate = -1, vca = -1;
 	             bool inf_lives = false, inf_fuel = false, invincible = false; } cli;
 	for (int i = 1; i < argc; i++) {
 		std::string a = argv[i];
@@ -307,6 +324,7 @@ int main(int argc, char **argv)
 			if (v.find("fuel") != std::string::npos) cli.inf_fuel = true;
 			if (v.find("invinc") != std::string::npos) cli.invincible = true;
 		}
+		else if (a == "--mc3340") cli.vca = 1;
 		else if (a == "--sound-test") sound_test = true;
 		else if (a == "--sound-demo") demo_path = next("--sound-demo");
 		else if (a == "--sound-wavs") wavs_dir = next("--sound-wavs");
@@ -321,8 +339,8 @@ int main(int argc, char **argv)
 		else if (a.size() > 1 && a[0] == '-') { fprintf(stderr, "unknown option %s (try --help)\n", a.c_str()); return 1; }
 		else paths.push_back(a);
 	}
-	if (!demo_path.empty()) { sound_demo(demo_path.c_str()); return 0; }
-	if (!wavs_dir.empty()) { sound_wavs(wavs_dir); return 0; }
+	if (!demo_path.empty()) { sound_demo(demo_path.c_str(), cli.vca > 0 ? 1 : 0); return 0; }
+	if (!wavs_dir.empty()) { sound_wavs(wavs_dir, cli.vca > 0 ? 1 : 0); return 0; }
 
 	if (!headless && !reset_settings) settings_load();
 	if (cli.lives >= 0) O.lives = cli.lives;
@@ -335,6 +353,7 @@ int main(int argc, char **argv)
 	if (cli.inf_lives) O.inf_lives = true;
 	if (cli.inf_fuel) O.inf_fuel = true;
 	if (cli.invincible) O.invincible = true;
+	if (cli.vca >= 0) O.vca = cli.vca;
 
 	/* ---------------- headless ---------------- */
 	if (headless) {
@@ -402,6 +421,7 @@ int main(int argc, char **argv)
 	{ int n = 0; SDL_JoystickID *ids = SDL_GetGamepads(&n); for (int i = 0; i < n; i++) open_pad(ids[i]); SDL_free(ids); }
 
 	SoundTest st;
+	st.syn.set_vca_model(O.vca);
 	bool running = true, paused = false, prev_coin = false, prev_svc = false, menu = false;
 	int msel = 0, shot_n = 0;
 	std::vector<uint32_t> view;
@@ -430,6 +450,7 @@ int main(int argc, char **argv)
 		case MI_SCALE:         snprintf(b, n, "Scaling  %s", O.integer ? "Integer" : "Fill window"); break;
 		case MI_ROTATE:        snprintf(b, n, "Rotate screen   %s", onoff(O.rotate)); break;
 		case MI_VOLUME:        snprintf(b, n, "Volume          %d%%", O.volume); break;
+		case MI_VCA:           snprintf(b, n, "Sound chip    %s", O.vca ? "MC3340" : "MB4391"); break;
 		case MI_FULLSCREEN:    snprintf(b, n, "Fullscreen      %s", onoff(O.fullscreen)); break;
 		case MI_RESET:         snprintf(b, n, "Reset game"); break;
 		case MI_LOAD:          snprintf(b, n, "Load ROM zip..."); break;
@@ -449,6 +470,7 @@ int main(int argc, char **argv)
 		case MI_SCALE:       O.integer = !O.integer; set_logical(); break;
 		case MI_ROTATE:      set_rotate(!O.rotate); break;
 		case MI_VOLUME:      O.volume = std::max(0, std::min(200, O.volume + 10 * dir)); break;
+		case MI_VCA:         O.vca = !O.vca; st.syn.set_vca_model(O.vca); break;
 		case MI_FULLSCREEN:  set_fullscreen(!O.fullscreen); break;
 		case MI_RESET:       if (have_game) { M.reset(); menu = false; } break;
 		case MI_LOAD:        open_pick_zip(); break;
@@ -517,6 +539,8 @@ int main(int argc, char **argv)
 					if (k == SDLK_4) { st.ship_on = !st.ship_on; st.ship(); }
 					if (k == SDLK_5) { st.ship_ab = (st.ship_ab + 1) & 3; st.ship(); }
 					if (k == SDLK_SPACE) { st.port[0] = st.port[1] = st.port[2] = 0xff; st.syn.reset(); st.ship_on = 0; }
+					if (k == SDLK_B) { st.port[0] = st.port[1] = st.port[2] = 0xff; st.syn.set_board(!st.syn.board_super()); st.ship_on = 0; }
+					if (k == SDLK_M) { O.vca = !O.vca; st.syn.set_vca_model(O.vca); settings_save(); }
 				}
 			}
 		}
@@ -553,6 +577,8 @@ int main(int argc, char **argv)
 			}
 			char t[64]; snprintf(t, sizeof t, "4  Player ship %s", st.ship_on ? "(on)" : "(off)"); text(6, (float)y, t, st.ship_on ? 255 : 200, st.ship_on ? 255 : 200, st.ship_on ? 0 : 200); y += 11;
 			snprintf(t, sizeof t, "5  Ship A/B bits: %d", st.ship_ab); text(6, (float)y, t, 200, 200, 200); y += 11;
+			snprintf(t, sizeof t, "B  Board: %s", st.syn.board_super() ? "Super Zaxxon" : "Zaxxon"); text(6, (float)y, t, 200, 200, 200); y += 11;
+			snprintf(t, sizeof t, "M  Sound chip: %s", O.vca ? "MC3340" : "MB4391"); text(6, (float)y, t, 200, 200, 200); y += 11;
 			text(6, (float)y, "Space  silence all", 200, 200, 200); y += 11;
 			text(6, (float)y, "+ -    volume", 200, 200, 200);
 		} else {
@@ -619,12 +645,12 @@ int main(int argc, char **argv)
 					const bool on = i == msel;
 					if (on) text(0, y, ">", 255, 255, 0);
 					text(10, y, b, on ? 255 : 210, on ? 255 : 210, on ? 0 : 210);
-					y += (i == MI_RESUME || i == MI_INVINCIBLE || i == MI_DIFF || i == MI_FULLSCREEN) ? 17 : 11;
+					y += (i == MI_RESUME || i == MI_INVINCIBLE || i == MI_DIFF || i == MI_FULLSCREEN) ? 16 : 10;
 				}
 				y += 4;
-				text(8, y, "Up/Down choose", 130, 130, 130); y += 10;
-				text(8, y, "Left/Right/Enter change", 130, 130, 130); y += 10;
-				text(8, y, "Esc / Tab close", 130, 130, 130); y += 10;
+				text(8, y, "Up/Down choose", 130, 130, 130); y += 9;
+				text(8, y, "Left/Right/Enter change", 130, 130, 130); y += 9;
+				text(8, y, "Esc / Tab close", 130, 130, 130); y += 9;
 				text(8, y, "Lives/bonus: next game", 130, 130, 130);
 			}
 		}
