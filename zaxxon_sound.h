@@ -35,6 +35,10 @@
  *   the MC3340's curve is 6.5 to 9.4 dB off on the same fade-outs (its sounds end too early).  The fitted curve is
  *   the default; the MC3340 curve can be selected instead (set_vca_model).
  *
+ * Engine styles
+ *   By default the player ship's engine is the circuit.  set_engine_style(ENGINE_MAME) instead plays loops cut from
+ *   that circuit the way MAME plays its engine samples (looped, layered, clipped); see set_engine_style.
+ *
  * Assumptions (where the drawings or data sheets do not say) are marked [ASSUMPTION] in the code; see README.md.
  *
  * 8255 outputs are active low: 0 starts a sound.  One-shots trigger on the 1 -> 0 edge.
@@ -44,6 +48,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 namespace zsnd {
@@ -321,9 +326,19 @@ public:
 	}
 	int get_vca_model() const { return vca_model; }
 
+	/* The player ship's engine noise.  ENGINE_BOARD is the circuit.  ENGINE_MAME imitates the way MAME plays the engine from its
+	   sample set: two short recordings looped (0.64 s and 0.75 s), layered, and clipped, which gives MAME's rougher, pulsing
+	   engine.  No recording is used here: the two loops are cut from this emulator's own ship circuit at the two settings the
+	   real-board recordings were made at (port A = f0 and f3), then saturated and clipped by the amounts measured in those
+	   recordings, and played with MAME's rules (see make_loops and the player ship in tick).  Both games use it, as in MAME;
+	   on Super Zaxxon it replaces the extra board's SOUND OUT A. */
+	enum { ENGINE_BOARD = 0, ENGINE_MAME = 1 };
+	void set_engine_style(int s) { eng_style = s == ENGINE_MAME ? ENGINE_MAME : ENGINE_BOARD; if (eng_style == ENGINE_MAME) make_loops(); }
+	int get_engine_style() const { return eng_style; }
+
 	void reset()
 	{
-		pa = pb = pc = 0xff;
+		pa = pb = pc = 0xff; pos_a = pos_b = 0;
 		noise = MM5837();
 		fifo.clear(); fir_pos = 0; sub_phase = 0; std::fill(std::begin(firbuf), std::end(firbuf), 0.0); dc_lp = 0;
 		init_parts();
@@ -339,6 +354,8 @@ public:
 		if (port == 0) {
 			const uint8_t fall = pa & ~v; pa = v;
 			if (fall & 0x20) os_bm.trigger();
+			if (fall & 0x04) pos_a = 0;                      /* MAME restarts a looped sample when it is switched on */
+			if (fall & 0x08) pos_b = 0;
 		} else if (port == 1) {
 			const uint8_t fall = pb & ~v; pb = v;
 			if (fall & 0x10) os_sexp.trigger();
@@ -387,13 +404,45 @@ public:
 private:
 	bool sz = false;
 	int vca_model = VCA_MB4391;
+	int eng_style = ENGINE_BOARD;
+	std::vector<float> loop_a, loop_b;          /* ENGINE_MAME loops, scaled to +-1 like a full-scale sample */
+	size_t pos_a = 0, pos_b = 0;
+	double loop_r = 0;                          /* rms of the board's ship output at port A = f0 (the ship branch's volts) */
+	double last_ship = 0;                       /* the ship branch's output, for make_loops */
+
+	/* Cut a loop from a second, board-mode copy of the sound board with port A held at port_a.  The board's noise is roughly
+	   Gaussian; tanh(k x) then a clip at c times its rms reproduce how much of each MAME recording is flattened at full scale
+	   and its rms-to-peak ratio (05.wav: 18 % of samples clipped, rms 0.71 of peak; 04.wav: 8.8 %, 0.62). */
+	static double cut_loop(uint8_t port_a, double settle, double secs, double k, double c, std::vector<float> &out)
+	{
+		auto t = std::make_unique<ZaxSound>();
+		t->write(0, port_a);
+		for (int i = 0; i < 4000; i++) t->ship_dac(port_a, 1e-3);    /* C25 takes seconds to settle: jump it there */
+		t->ship_g = t->cds_target(); t->set_mfb();
+		t->run((int)(FS * settle));
+		const int n = (int)std::lrint(secs * FS);
+		std::vector<double> x(n);
+		double ss = 0;
+		for (int i = 0; i < n; i++) { t->tick(); x[i] = t->last_ship; ss += x[i] * x[i]; }
+		const double r = std::sqrt(ss / n), zc = std::tanh(k * c);
+		out.resize(n);
+		for (int i = 0; i < n; i++) out[i] = (float)clampd(std::tanh(k * x[i] / r) / zc, -1.0, 1.0);
+		return r;
+	}
+	void make_loops()
+	{
+		if (!loop_a.empty()) return;
+		/* different settle times so the two loops hold different stretches of the noise generator's sequence */
+		loop_r = cut_loop(0xf0, 0.2, 0.6354, 1.087, 1.338, loop_a);            /* like 05.wav, 627 Hz */
+		cut_loop(0xf3, 0.9, 0.7516, 0.737, 1.706, loop_b);                      /* like 04.wav, 331 Hz */
+	}
 	uint8_t pa = 0xff, pb = 0xff, pc = 0xff;
 
 	MM5837 noise;
 	HP n1_ac;                                   /* MM5837 output with its average removed (C66 / C67 / C44 / C28 couplings) */
 
 	/* -- player ship (Zaxxon) */
-	double ship_y = 0.76, ship_g = 5e-7;        /* C25 node, CdS conductance */
+	double ship_y = 2.18, ship_g = 1.06e-4;     /* C25 node, CdS conductance (settled at PA &3 = 3) */
 	double c34 = 6, c35 = 6;
 	SVF mfb, sk_s1, sk_s2;
 	VCA vca_ship1, vca_ship2;
@@ -468,7 +517,7 @@ private:
 		n1_ac.set(1.0, 6.75);
 
 		/* ---- player ship */
-		ship_y = 0.76; ship_g = 5e-7; c34 = c35 = VREF; ship_cnt = 0;
+		ship_y = 2.18; ship_g = 1.06e-4; c34 = c35 = VREF; ship_cnt = 0;
 		mfb.clear(); sk_s1.clear(); sk_s2.clear();
 		sk_lowpass(sk_s1, 100e3, 100e3, 2200e-12, 2200e-12, 2.0);      /* U5: R24/R25 100k, C30/C31 2200p, K = 1 + R23/R22 */
 		sk_lowpass(sk_s2, 100e3, 100e3, 3300e-12, 3300e-12, 2.0);      /* U5: R38/R39 100k, C39/C40 3300p */
@@ -581,21 +630,24 @@ private:
 
 		double sj = 0;                                       /* sum of k * g * v over the branches */
 
+		/* ================= player ship, MAME-style (see set_engine_style) ================= */
+		if (eng_style == ENGINE_MAME && !loop_a.empty()) {
+			/* MAME: PA2 = 0 loops 05.wav, PA3 = 0 loops 04.wav, both at volume 0.5 + 0.157 x (PA & 3); the raw port is used, so
+			   Super Zaxxon gets the same loops, as in MAME.  [CALIBRATED: MAME_K sets MAME's own balance: at port A = f0 its
+			   engine is 21 dB above this emulator's board engine while its other samples are about 12 dB above this emulator's
+			   other sounds, so the loops play about 9 dB above the board engine there] */
+			static constexpr double MAME_K = 5.9;
+			double v = 0;
+			if (!(pa & 0x04)) { v += loop_a[pos_a]; if (++pos_a >= loop_a.size()) pos_a = 0; }
+			if (!(pa & 0x08)) { v += loop_b[pos_b]; if (++pos_b >= loop_b.size()) pos_b = 0; }
+			sj += br[B_SHIP].k * br[B_SHIP].g * MAME_K * loop_r * (0.5 + 0.157 * (pa & 3)) * v;
+		}
 		/* ================= player ship (Zaxxon) ================= */
-		{
-			/* 7406 open-collector outputs pulled up by R10 / R11 2.2k: PA = 0 -> high */
-			const bool a_hi = !(mpa & 1), b_hi = !(mpa & 2);
-			const double va = a_hi ? 12.0 : TTL_LO, ra = a_hi ? 2.2e3 + 6.8e3 : 6.8e3;    /* through R12 6.8k */
-			const double vb = b_hi ? 12.0 : TTL_LO, rb = b_hi ? 2.2e3 + 100e3 : 100e3;    /* through R16 100k */
-			const double t = (12.0 / 82e3 + va / ra + ship_y / 36e3) / (1.0 / 82e3 + 1.0 / 56e3 + 1.0 / ra + 1.0 / 36e3);  /* R13, R15, R14 */
-			ship_y += ((t - ship_y) / 36e3 + (vb - ship_y) / rb) * DT / 15e-6;              /* C25 15u */
+		else {
+			ship_dac(mpa, DT);
 			if (++ship_cnt >= 8) {
 				ship_cnt = 0;
-				/* U8 follower -> MCD-725H LED through R17 390 -> CdS cell.  [ASSUMPTION: LED 1.4 V; cell 1.6k at full current,
-				   R ~ I^-0.8, 2 M dark, 8 ms to brighten, 40 ms to darken; full current then tunes the filter to 626 Hz,
-				   the pitch of the real board's recording] */
-				const double i = std::max(0.0, (std::min(ship_y, OA_HI) - 1.4) / 390.0);
-				const double gt = 1.0 / 2e6 + (i > 0 ? (1.0 / 1.6e3) * std::pow(i / ((OA_HI - 1.4) / 390.0), 0.8) : 0.0);
+				const double gt = cds_target();
 				const double tau = gt > ship_g ? 8e-3 : 40e-3;
 				ship_g = std::exp(std::log(ship_g) + (std::log(gt) - std::log(ship_g)) * (1.0 - std::exp(-8 * DT / tau)));
 				set_mfb();
@@ -615,7 +667,8 @@ private:
 			const double o1 = vca_ship1.run(s1 * kin, (c34 + VREF) / 2);            /* U14 half 1, CON from U11 (R29/R30) */
 			const double o2 = vca_ship2.run(s2 * kin, (c35 + VREF) / 2);            /* U15 half 1 */
 			/* [ASSUMPTION] U14 and U15 OUT1 are both wired to R177 (the trace is lost in the scan); tied outputs average */
-			sj += br[B_SHIP].k * br[B_SHIP].g * 0.5 * (o1 + o2);
+			last_ship = 0.5 * (o1 + o2);
+			sj += br[B_SHIP].k * br[B_SHIP].g * last_ship;
 		}
 
 		/* ================= homing missile (PA4) ================= */
@@ -782,7 +835,7 @@ private:
 		}
 
 		/* ================= Super Zaxxon SOUND OUT A (engine) ================= */
-		if (sz) sj += br[B_SOA].k * br[B_SOA].g * sound_out_a();
+		if (sz && eng_style == ENGINE_BOARD) sj += br[B_SOA].k * br[B_SOA].g * sound_out_a();
 
 		/* ================= summing amplifier U11 ================= */
 		const double sjv = sj / gtot;
@@ -827,6 +880,26 @@ private:
 		const double g = 1.0 / rup + (d ? 1.0 / rdn : 0.0);
 		const double vinf = (5.0 / rup + (d ? vl / rdn : 0.0)) / g;
 		v = vinf + (v - vinf) * ek(g / c);
+	}
+
+	/* -------- Zaxxon player ship: the two-bit DAC that sets the engine's pitch */
+	void ship_dac(uint8_t m, double dt)
+	{
+		/* 7406 open-collector outputs pulled up by R10 / R11 2.2k: PA = 0 -> high */
+		const bool a_hi = !(m & 1), b_hi = !(m & 2);
+		const double va = a_hi ? 12.0 : TTL_LO, ra = a_hi ? 2.2e3 + 68e3 : 68e3;      /* through R12 68k */
+		const double vb = b_hi ? 12.0 : TTL_LO, rb = b_hi ? 2.2e3 + 100e3 : 100e3;    /* through R16 100k */
+		const double t = (12.0 / 82e3 + va / ra + ship_y / 36e3) / (1.0 / 82e3 + 1.0 / 56e3 + 1.0 / ra + 1.0 / 36e3);  /* R13, R15, R14 */
+		ship_y += ((t - ship_y) / 36e3 + (vb - ship_y) / rb) * dt / 15e-6;              /* C25 15u */
+	}
+	/* U8 follower -> MCD-725H LED through R17 390 -> CdS cell.  The DAC gives C25 about 8.9 / 6.5 / 4.6 / 2.2 V for PA&3 = 0..3,
+	   so the LED runs at 19.3 / 13.0 / 8.2 / 2.0 mA.  [CALIBRATED: LED 1.4 V; cell 1.55k at 19.3 mA, R ~ I^-0.8, 2 M dark, 8 ms to
+	   brighten, 40 ms to darken.  This puts the noise band at 630 Hz for PA&3 = 0 and 331 Hz for PA&3 = 3, the peaks of the real
+	   board's two recordings (627 and 331 Hz)]  Returns the conductance the cell is heading for. */
+	double cds_target() const
+	{
+		const double i = std::max(0.0, (std::min(ship_y, OA_HI) - 1.4) / 390.0);
+		return 1.0 / 2e6 + (i > 0 ? (1.0 / 1.55e3) * std::pow(i / 19.3e-3, 0.8) : 0.0);
 	}
 
 	/* -------- Super Zaxxon daughterboard, SOUND OUT A: the engine */

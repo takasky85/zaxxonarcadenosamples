@@ -53,14 +53,14 @@ A game controller works too (D-pad/stick, A/B/X fire, Start = 1P, Right bumper =
 
 Esc or Tab opens a menu (on a controller: Y or Guide; D-pad moves, A selects, B closes): **infinite lives**, **infinite fuel**,
 **invincible** (the three cheats from the MAME cheat files, applied every frame), lives, bonus ship, free play, Super Zaxxon difficulty,
-scaling (fill the window or integer multiples only), rotate, volume, sound chip (MB4391 or MC3340 curve, see below), fullscreen, reset,
-load ROM zip, quit. Settings are saved.
+scaling (fill the window or integer multiples only), rotate, volume, sound chip (MB4391 or MC3340 curve, see below), engine sound
+(Board or MAME-style, see below), fullscreen, reset, load ROM zip, quit. Settings are saved.
 Lives and bonus take effect on the next game.
 
 The picture is always scaled with nearest-neighbour filtering, never smoothed.
 
 Options: `--scale N`, `--no-rotate`, `--volume X`, `--lives 3|4|5`, `--free-play`, `--hard`, `--bonus 10000|20000|30000|40000`,
-`--cheat lives,fuel,invincible` (or `all`), `--integer`, `--mc3340`.
+`--cheat lives,fuel,invincible` (or `all`), `--integer`, `--mc3340`, `--engine board|mame`.
 `zaxxon --help` lists them all, including the headless ones (`--headless --frames N --wav out.wav --shot out.bmp --coin-at N --start-at N --autoplay`).
 
 ## Listening to the sounds on their own
@@ -68,15 +68,16 @@ Options: `--scale N`, `--no-rotate`, `--volume X`, `--lives 3|4|5`, `--free-play
 These need no ROMs:
 
 * `zaxxon --sound-test` – a window where keys trigger every sound: Q cannon, W M-Exp, E S-Exp, R shot, T base missile,
-  Y/U alarms, 1 battleship, 2 laser, 3 homing missile, 4 player ship on/off, 5 ship A/B bits,
-  **B** switches between the Zaxxon board and Super Zaxxon's (with the extra sound board), **M** switches the MB4391 / MC3340 curve.
+  Y/U alarms, 1 battleship, 2 laser, 3 homing missile, 4 player ship on/off, 5 ship A/B bits, 6 ship C bit,
+  **B** switches between the Zaxxon board and Super Zaxxon's (with the extra sound board), **M** switches the MB4391 / MC3340 curve,
+  **N** switches the engine sound between Board and MAME-style.
 * `zaxxon --sound-wavs folder` – one WAV per sound, named like the MAME sample files (`00.wav` battleship, `01` laser, `02` base missile,
   `03` homing missile, `04`/`05` player ship, `08` cannon, `10` M-Exp, `11` S-Exp, `20` alarm 3, `21` alarm 2, `23` shot), every
   player-ship setting the games use (`ship_f0` … `ship_f7`), Super Zaxxon's engine (`sz_ship_f4` … `sz_ship_f7`) and its boss sound
-  (`sz_00`), plus `sounds.txt`.
+  (`sz_00`), the MAME-style engine (`mame_ship_f0`, `f3`, `f4`, `f7`), plus `sounds.txt`.
 * `zaxxon --sound-demo demo.wav` – every sound one after another in one WAV file.
 
-Add `--mc3340` to any of them to hear the repair part's curve instead.
+Add `--mc3340` to any of them to hear the repair part's curve instead, or `--engine mame` (`--sound-demo`) for the MAME-style engine.
 
 ## What is emulated
 
@@ -102,6 +103,20 @@ parts, all running at 192 kHz and filtered down to 48 kHz:
   functions from the part values), **4016 analog switches** with their coupling capacitors (the clicks at sound start are real),
   the **CdS photocell** that tunes the player-ship filter, the transistor that sweeps the cannon's filter, and the
   **output mixer** (R174 … R209 into the U11 summing amplifier, which can clip like the real one).
+
+### Engine sound: Board or MAME-style
+
+On the real board the player ship's engine is the noise chip through a band-pass filter that a photocell tunes (a two-bit DAC
+on port A bits 0–1 moves it from about 630 Hz down to 334 Hz) and then one of two filters (bit 2). It is smooth noise that never repeats. The menu's
+**Engine sound** switch (or `--engine mame`) offers a second sound, **MAME-style**, for players who know MAME's engine: MAME plays two
+short recordings (0.64 s and 0.75 s) looped and layered while bit 2 / bit 3 are low, at a volume that bit 0–1 set, and both
+recordings were boosted until about 9–18 % of their samples clipped. The loops repeating against each other are the pulsing, and the
+clipping is the roughness. MAME's samples are also about 9 dB louder against the other sounds than the board's engine.
+
+MAME-style does the same with **no recordings**: it cuts two loops of the same lengths from this emulator's own ship circuit, at the
+two settings the real recordings match (port A = f0 and f3), saturates and clips them by the measured amounts, and plays them with
+MAME's rules and balance. Its spectrum is within about 2 dB of MAME's, clipping harmonics included. On Super Zaxxon it replaces the
+extra board's engine, as MAME does. Board is the default.
 
 ### The MB4391
 
@@ -137,19 +152,22 @@ this repository and are never played):
 | Shot (also the coin sound) | a chirp every 30–40 ms peaking at 2.1–2.8 kHz, falling to about 300 Hz | same |
 | Cannon (your ship's fire) | noise through a filter sweeping 3.7 → 1.85 kHz | same sweep |
 | Small / medium explosion | low-passed noise, fade within about 2 dB | same spectrum |
-| Player ship (port A = f0) | 622 Hz | 626–633 Hz |
+| Player ship (port A = f0) | noise band peaking at 630 Hz | 627 Hz (`05.wav`) |
+| Player ship (port A = f3) | noise band peaking at 334 Hz, centroid 366 Hz | 331 Hz, centroid 366 Hz (`04.wav`) |
 | Laser (force field) | 275–504 Hz sweep, 0.19 s period | 273–504 Hz, 0.19 s |
 | Homing missile | 900–1125 Hz, median 1012 Hz, 15 Hz wobble | 950–1125 Hz, median 1019 Hz, 14 Hz |
 
-The recording named `02.wav` (base missile) has the same spectrum as the player-ship recording; the emulator follows the drawing
-(filtered noise) instead.
+The recording named `02.wav` (base missile) has the same spectrum as `04.wav`, the player ship at port A = f3; the emulator follows
+the drawing (filtered noise) instead. `05.wav` also has strong energy around 1.6–2 kHz that the board does not make: about 16 % of
+its samples are clipped at full scale, and clipping adds those harmonics.
 
 ### What was calibrated, and what is assumed
 
 These were set from the recordings because the drawings and data sheets do not fix them; they are marked `[CALIBRATED]` in
 the source: the MB4391 curve (above), the LM324's output floor when sinking current (0.648 V at 1 mA, which sets the battleship
 pitch), the LM324 Schmitt triggers' 40 µs saturation delay (fitted to the laser; the shot then matched without further fitting),
-the 556 comparator delay of the alarm clock (1.15 µs), the CdS cell's resistance at full LED current (sets the engine's pitch),
+the 556 comparator delay of the alarm clock (1.15 µs), the CdS cell's resistance and light curve (1.55 kΩ at 19.3 mA, R ∝ I^-0.8; fitted to the
+engine's pitch at port A = f0 and f3),
 the homing missile's C45 at 9.1 nF (drawn 10 nF, so inside its tolerance; 10 nF plays about 10 % low), and the shot's electrolytic
 C89 at 0.78 µF (drawn 0.68 µF; sets how fast the shot fades, which then matches the recording within 0.6 dB). The cannon transistor uses textbook Ebers-Moll values (reverse beta 3).
 
