@@ -499,10 +499,13 @@ int main(int argc, char **argv)
 
 	SDL_AudioSpec spec; SDL_zero(spec);
 	spec.format = SDL_AUDIO_S16; spec.channels = 1; spec.freq = RATE;
-	SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "1024");
+	SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "512");
 	SDL_AudioStream *as = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
 	if (!as) fprintf(stderr, "audio unavailable: %s\n", SDL_GetError());
-	const int Q_HIGH = 3 * FRAME_SMP * 2, Q_LOW = FRAME_SMP * 2;
+	/* Keep three to four frames (50 to 67 ms) of sound queued.  The loop also waits for the display's vsync, so between two
+	   top-ups the queue must ride out a late frame or two plus one device period; if it runs dry the device plays a gap,
+	   and gaps sound like static.  (It used to keep one to three frames, which a 1024-sample device period could empty.) */
+	const int Q_HIGH = 3 * FRAME_SMP * 2, Q_LOW = 3 * FRAME_SMP * 2;
 	if (as) SDL_ResumeAudioStreamDevice(as);
 
 	std::vector<SDL_Gamepad *> pads;
@@ -710,7 +713,7 @@ int main(int argc, char **argv)
 			else start_game(set);
 		}
 
-		/* pacing: keep about two frames of audio queued */
+		/* pacing: keep three to four frames of audio queued (see Q_HIGH) */
 		if (as) { while (SDL_GetAudioStreamQueued(as) > Q_HIGH && running) SDL_Delay(1); }
 		else {
 			Uint64 now = SDL_GetTicksNS();
